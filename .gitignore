@@ -1,0 +1,4 @@
+.envy/
+.envy-cache-*
+target/
+gateware/.venv/

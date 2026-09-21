@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+binary="$script_dir/../target/debug/glasgow-tool"
+
+if [[ ! -x "$binary" ]]; then
+    echo "ERROR: glasgow-tool is not built; run bin/b first" >&2
+    exit 1
+fi
+
+exec "$binary" "$@"
