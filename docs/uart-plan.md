@@ -1,258 +1,217 @@
-# Native Glasgow and C232HD UART tools: staged implementation plan
+# Native UART tools
 
-## Context
+## Status and scope
 
-Deliver two independently runnable native serial-console executables, `guart` for Glasgow and `c232uart` for the FTDI C232HD-DDHSP-0. Both transmit and receive concurrently; a development harness controls the actual executables to validate cross-device traffic, measure bandwidth and round-trip latency, and identify the highest tested error-free operating rates. Release targets are macOS ARM64, Linux x86-64/ARM64, and Windows x86-64. Rust versus Go is explicitly reserved for a separate user discussion: neither embedded Python nor an implicit language choice satisfies the request.
+This repository builds two native Rust executables:
 
-This plan defines the same externally observable contracts for either native language. **Native implementation is gated on a user-supplied `NATIVE_LANGUAGE=rust` or `NATIVE_LANGUAGE=go`; the implementer must not choose it.** Language-independent gateware, resource generation, test vectors, and harness work can proceed before that gate. No tests, builds, firmware changes, or hardware communication were performed during planning; a read-only USB inventory did not find an attached Glasgow or FTDI target.
+- `guart`: fixed-profile UART on Glasgow revC hardware revisions C0 through C3.
+- `c232uart`: UART on the FTDI C232HD-DDHSP-0 through either the OS VCP driver or an explicit direct-USB backend.
 
-## Approach
+Linux is the runtime-validation platform. Windows and macOS are compile-and-package targets. Runtime binaries do not require Python. Python, uv, Amaranth, and the Glasgow software stack are build-time dependencies used only to generate embedded resources.
 
-### Stage 0 — establish the implementation gate and shared contracts
+Physical qualification is complete for the selected 64 KiB quick-matrix scope through 3,000,000 bit/s. Both C232 backends pass every corpus bidirectionally at 9,600, 115,200, 1,000,000, and 3,000,000 bit/s. At 12,000,000 bit/s, C232-to-Glasgow traffic produces Glasgow framing errors on this fixture; that rate is not hardware-qualified. Release packaging follows the qualification results below.
 
-**Deliverable:** one selected native language, one fixed product contract, and build/test entry points that do not require a later redesign.
+## Architecture
 
-1. Use new root `uart-tools/` for the two native applications, resource builder, and development harness. Repository searches found no existing native UART host application, Rust manifest, or Go module to extend. Do not fork the existing Python Glasgow CLI or make either executable invoke it.
-2. Create `uart-tools/build.py` as the development-only, Python 3.13+ build/test driver. Commands are `build`, `test`, `smoke`, and `package`; every native command requires `--language rust|go` and `--target macos-arm64|linux-x86_64|linux-arm64|windows-x86_64`. Missing language exits nonzero with `LANGUAGE_DECISION_REQUIRED`; there is no default. The separate user language decision supplies this value before native source/package initialization. Do not maintain two production implementations.
-3. Use these source layouts after the user chooses:
-   - **Rust:** `uart-tools/native/Cargo.toml`, `src/bin/guart.rs`, `src/bin/c232uart.rs`, `src/lib.rs`, and modules `cli`, `session`, `terminal`, `usb`, `glasgow`, `serial_vcp`, `ftdi_usb`, `resources`; contract tests in `tests/`.
-   - **Go:** `uart-tools/native/go.mod` with local module `glasgow.local/uarttools`, `cmd/guart/main.go`, `cmd/c232uart/main.go`, and matching `internal/cli`, `session`, `terminal`, `usb`, `glasgow`, `serialvcp`, `ftdiusb`, `resources` packages; package-local `_test.go` files.
-   - These are new paths, not claims about existing files. Use the chosen language's normal compiler, dependency lock/checksum mechanism, and OS bindings. Both branches use the same libusb C API contract and native serial APIs below, not different transport architectures. Resolve and lock concrete supported compiler/library releases in the language-selection stage; builds must consume the recorded lock, not floating latest versions.
-4. Products and fixed configuration:
-   - `guart list [--json]`; `guart console --serial ID [--baud N]`; `guart stream --serial ID [--baud N] [stream options]`.
-   - `c232uart list [--json]`; `c232uart console --serial ID [--backend vcp|usb] [--baud N]`; `c232uart stream --serial ID [--backend vcp|usb] [--baud N] [stream options]`.
-   - Both support `--help`, `--version`, and `--licenses` without accessing hardware.
-   - Default baud 115200; fixed 8N1, no hardware or software flow control. Glasgow profile is noninverted A0 RX/A1 TX with port A at 3.3 V. Pins/parity/stop bits are not runtime switches in this product; reject unknown switches rather than imply arbitrary embedded configurations.
-   - Require exact device identity for lab runs. Console auto-selection is permitted only when exactly one eligible device exists. Listing must not configure, reset, upload firmware, detach drivers, or alter ports. Zero devices produces an empty list successfully; opening an absent, ambiguous, inaccessible, or busy device fails before mutation.
-   - FTDI VCP uses the serial-to-port mapping from OS device metadata. Optional `--port PATH` is permitted only with the VCP backend and must resolve to the same selected FT232H identity; conflicting serial/path selection fails.
-5. Fix the internal session contract, translating these language-neutral signatures idiomatically rather than inventing different semantics per backend:
-   - `Enumerate() -> list<DeviceInfo>`.
-   - `Open(DeviceSelector, SessionConfig) -> Session`, with `Info() -> SessionInfo` only after successful configuration.
-   - `ReadSome(buffer, deadline, cancellation) -> ProgressResult` and `WriteSome(buffer, deadline, cancellation) -> ProgressResult`, allowing one reader and one writer concurrently.
-   - `Drain(deadline) -> DrainResult`, `SnapshotStats() -> SessionStats`, and idempotent `Close(graceful|abort, deadline)`.
-   - `ProgressResult` preserves known transferred bytes even on timeout/cancellation and marks indeterminate progress explicitly. Never replay an entire failed write when some bytes may already have been sent.
-   - `DrainResult.level` is `fpga_idle`, `device_empty`, `host_empty`, or `unknown`. Only Glasgow's added status proves FPGA TX idle; FTDI TEMT is device-reported empty, and VCP may expose only a host queue. Peer-verified delivery is a separate harness result, never inferred from these levels.
-6. Use one session/lifecycle owner, independent RX and TX workers, and a separately serviced USB event/management path. Do not hold a common lock across blocking I/O in opposite directions. Initial application queues are bounded at 256 KiB per direction; USB pools start at eight 4096-byte IN transfers and four 4096-byte OUT transfers, with descriptor-aligned IN buffers. Account for queues plus in-flight data. Backpressure waits under a deadline; unavoidable receive loss/full queues is an explicit error, never silent dropping or unbounded allocation. Later performance work changes these values only with evidence.
-7. Build `uart-tools/contract.json` as the small shared contract/vector definition used by native tests and the Python harness: CLI names, stable error codes, event schema version, golden baud/protocol cases, and binary corpora. This is needed to keep two executables and the harness interoperable; do not add a general plugin/configuration framework.
-
-**Gate:** Stage 0 does not resolve Rust versus Go itself. If that input is missing, finish only the explicitly language-independent stages and mark native stages blocked. Do not interpret plan approval as permission to pick a language or substitute a Python release.
-
-### Stage 1 — produce safe, immutable Glasgow UART resources
-
-**Depends on:** fixed profile from Stage 0, not the native language. **Deliverable:** build-time-only bitstreams, firmware segments, metadata, and simulation proof.
-
-1. Reuse `UART`, `UARTComponent`, `UARTInterface`, `HardwareAssembly`, and `GlasgowBuildPlan` from:
-   - `software/glasgow/gateware/uart.py`;
-   - `software/glasgow/applet/interface/uart/__init__.py`;
-   - `software/glasgow/hardware/assembly.py` and `build_plan.py`.
-   Do not rewrite the UART bit engine. Preserve CR/LF receive-flush behavior initially; those bytes remain payload, not delimiters.
-2. Fix the discovered A0/B0 clock-metadata mismatch at its source before packaging those revisions: `HardwareAssembly.sys_clk_period` currently says 36 MHz, but `platform/rev_ab.py` selects a 30 MHz default IFCLK and `firmware/fx2/fpga.c:load_end()` configures 30 MHz. Change the A0/B0 branch to `1/30e6`; leave C0/C1/C2/C3/D0 at `1/48e6` and simulation at its existing 1 MHz. No callers change signature. Re-enumerate all consumers with regex `\.sys_clk_period\b` under `software/glasgow`, including `legacy.py`; update the stale 36/48 MHz comment in the simulation property without changing simulation frequency. Verify generated timing constraints and a waveform/physical timing check; do not solve the discrepancy with a UART-only multiplier. If a re-read shows a newly added clock converter, stop this edit and derive the property from that converter before emitting resources; never export contradictory clocks.
-3. Make these narrow observability changes in `UARTComponent` and its host interface:
-   - Widen `rx_errors` and `rx_overflow` outputs from 16 to 32 bits; retain their current event semantics. Update `UARTInterface.monitor()` delta arithmetic from modulo 2^16 to modulo 2^32. This avoids hidden multiple wraps during ordinary one-second high-rate monitoring. Report reset epochs separately from rollover.
-   - Add `tx_state: Out(33)`. Bits 0..31 are a wrapping count incremented on `uart.tx_ack & uart.tx_rdy`; bit 32 is `uart.tx_rdy`. The existing UART asserts readiness only after the final stop bit, so this provides real completion evidence without modifying the core FSM.
-   - Append `UARTInterface._tx_state = assembly.add_ro_register(component.tx_state)` after the existing registers. Add `async get_tx_state(self) -> tuple[int, bool]` returning count and idle. Existing `write()`/`flush()` behavior stays unchanged; do not silently strengthen `flush()` or add polling to every write.
-   - For the fixed single-UART build, expected user addresses remain use_auto=3, manual_cyc=4, auto_cyc=5, bit_cyc=6, rx_errors=7, rx_overflow=8; tx_state is appended at 9. Export actual allocation instead of duplicating these numbers in native code. Error registers now occupy four bytes; TX state occupies five. Changing widths/new signal changes the embedded resource identity.
-   - Inspect references before editing: no LSP is configured in this checkout, so search `UARTComponent`, `UARTInterface`, `_rx_errors`, `_rx_overflow`, and `monitor` in the UART applet/tests and other source consumers. Preserve the existing simulation/replay cases and external UART APIs.
-4. Add `HardwareAssembly.export_manifest(self) -> dict[str, Any]`, usable only after `artifact()` seals the assembly and without a live device. Return a detached, serializable snapshot of revision, system clock Hz, register names/addresses/bit and byte widths/access, pipe ordinals/modes, configured voltages/pulls, and fixed data-layout metadata. Reuse `_registers`, `_pipes`, and stream allocation; do not add a second allocator. Calling before sealing raises `RuntimeError`; duplicate/missing semantic UART registers and unknown pipe layouts fail resource generation.
-   - Do not export unbound endpoint fields containing `-1`. Record expected API-9 roles/modes and resolve actual endpoints from descriptors at runtime.
-   - `I2CRegisters` snapshots a whole selected register before shifting read bytes, so a packed 33-bit TX register is atomic. Register reads are little-endian; writes are big-endian. These are not interchangeable with ordinary little-endian management fields.
-5. Create `uart-tools/build_resources.py` with CLI `--output DIR --revisions REV...`. Construct `HardwareAssembly(revision=...)`, instantiate `UARTApplet(assembly)`, parse its existing build arguments for A0 RX/A1 TX/8N1/A=3.3 V, and invoke `applet.build(args)`. That existing method supplies `assembly.add_applet(self)`, voltage/pull handling, and `UARTInterface(logger, assembly, ...)`; do not omit its reset domain or duplicate its construction. Invoke `artifact()`, `export_manifest()`, `plan.get_bitstream()`, and `plan.bitstream_id` during the build only.
-6. Build exact revision entries A0, B0, C0, C1, C2, C3, D0. Four platform families exist (A/B, C0, C1–C3, D0), but deduplicate bytes only after every revision build is verified equivalent; an exact revision-keyed manifest is mandatory. Preserve raw iCE40 `.bin`/ECP5 `.bit` product bytes. The old CLI's output has an eight-byte ID prefix and cache files have checksum headers: neither is the raw payload to upload.
-7. Emit `uart-tools/resources/manifest.json` with schema version 1, profile ID `uart-a0rx-a1tx-8n1-v1`, source revision/tool versions, API level 9, exact revision allowlist, system clock, pins/framing/raw codec, integer-divisor bounds/rounding, typed register map, expected management/pipe topology, raw bitstream length, eight-byte ID, and SHA-256 content hashes. Firmware resources derive from checked-in `firmware-fx2.ihex` and `firmware-stm32.bin`; parse IHEX at build time into address/offset/length segments plus binary data, never into the release runtime. Include the expected D0 512-byte STM32 boot image and its hash. Missing, corrupt, empty, unexpectedly sized firmware or unsuccessful synthesis fails the build; never publish partial resource sets.
-8. Native builds embed resource bytes and metadata directly. No runtime synthesis, cache directory, Python interpreter, PDM, Glasgow CLI, Docker, network fetch, or sidecar resource file is allowed.
-
-**Gate:** all revision resources build explicitly without synthesis skips; UART timing, counter rollover and final-stop-bit simulations pass. Physical qualification is recorded separately from successful builds. A0/B0 high rates are limited by their 30 MHz clock: do not expect them to match every C/D rate.
-
-### Stage 2 — shared console and native C232HD VCP tool
-
-**Depends on:** language gate. **Independent of:** Glasgow resource/backend implementation. **Deliverable:** `c232uart` works as a real standalone serial console and establishes shared CLI/session behavior.
-
-1. Implement shared native CLI, terminal, and session modules in the selected layout. Use OS byte I/O rather than text decoding. Every stdout write handles short completion; invalid UTF-8 and control bytes survive unchanged. Submit small available TX writes promptly rather than waiting to fill a transfer buffer. Before successful exit, write every accepted RX byte to stdout under the active deadline; a blocked/broken stdout must not produce a false successful receive count. Validate positive integer baud and nonnegative byte/deadline arguments before opening hardware.
-2. `console` requires a terminal, saves its complete mode, disables local echo/canonical processing/input translations/software flow control, and forwards Ctrl-C as byte 0x03. Escape is Ctrl-] followed by `q`; Ctrl-] followed by Ctrl-] sends one literal Ctrl-]. Other escape pairs are forwarded unchanged. Parse byte-by-byte across arbitrary read boundaries. Restore terminal modes on normal quit, catchable interruption, errors and disconnect; do not promise restoration after uncatchable termination/power loss. Native POSIX and Windows console implementations must both be covered.
-3. `stream` never interprets escapes, line endings, Ctrl-Z, or UTF-8. stdin is TX, stdout is RX; stderr contains diagnostics. On stdin EOF, seal/submit TX and continue receiving by default without polling an empty stdin in a busy loop. `--exit-on-eof` exits after the supported drain level and explicitly does not promise a delayed target reply. `--rx-bytes N` instead exits only after stdin EOF, its drain barrier, and exactly N received bytes delivered to stdout; premature timeout/disconnect or observed excess data fails. N=0 supports a send-only half of a lab run. These two exit options are mutually exclusive. `--timeout-ms N` is a whole-session deadline (0/omitted means unlimited); lab runs always supply a positive value. Opening/configuration and shutdown operations retain their own finite deadlines even for an unlimited console session.
-4. Add opt-in `--events-json` for stream runs. stderr then contains only newline-delimited JSON events, never mixed human log lines or payload. Every event has `schema_version=1`, `event`, and session-local monotonic timestamp. Event names are `ready`, `stats`, `tx_drained`, `closed`, `error`.
-   - `ready`: device identity, backend, revision/API when applicable, profile/resource hashes, requested baud, nominal baud or null, driver-configured baud or null, rate provenance (`fpga_divider`, `ftdi_divider`, `driver_setting`, `unknown`), USB speed when known, error-counter capabilities, drain capability, and configured latency timer or null.
-   - `stats`: cumulative payload RX/TX counts, known partial/aborted counts, current error/overflow values or null, source labels, queue high-water marks and software-drop count. Emit at one-second intervals and on close, never per byte.
-   - `tx_drained` includes its honest drain level and barrier byte count. `error` carries a stable code and diagnostic text, with OS/USB detail when available.
-   - Stable errors include `INVALID_ARGUMENT`, `DEVICE_NOT_FOUND`, `AMBIGUOUS_DEVICE`, `DEVICE_BUSY`, `PERMISSION_DENIED`, `DRIVER_CONFLICT`, `UNSUPPORTED_BAUD`, `UNSUPPORTED_REVISION`, `RESOURCE_MISMATCH`, `PROVISIONING_REQUIRED`, `PROTOCOL_ERROR`, `PORT_FAULT`, `RX_OVERFLOW`, `TIMEOUT`, and `DISCONNECTED`. Normal exits are 0, argument errors 2, operational failures 1. The harness uses event codes, not English wording.
-5. Default FTDI backend is `vcp`; enumerate only positively identified FT232H devices (default USB VID/PID 0403:6014, plus reported serial/location), not arbitrary first COM/tty ports. Use `/dev/cu.*` on macOS. Retain selected identity across enumeration-to-open and reject mismatched paths.
-6. Implement VCP adapters directly with native OS APIs:
-   - Linux: raw nonblocking serial descriptor, exclusive claim where supported, target-ABI-correct termios2/BOTHER numeric speeds, poll-based readiness/cancellation. Do not copy host ioctl structs into another architecture.
-   - macOS: raw serial descriptor, conventional termios setup and IOSSIOSPEED for arbitrary rates; readiness/cancellation and exclusive access. An accepted setting is not measured hardware baud.
-   - Windows: exclusive CreateFile/OPEN_EXISTING/FILE_FLAG_OVERLAPPED, 8N1 DCB, numeric BaudRate, separate stable RX/TX OVERLAPPED state, bounded read/write completion policies. Explicitly enable binary mode and disable null stripping, error-character substitution and abort-on-line-error. Aggregate every ClearCommError invocation; its clearing flags are observations, not exact byte-error counters.
-   - Disable XON/XOFF, RTS/CTS and DSR/DTR flow control. Set RTS/DTR deasserted after open; warn that drivers can transiently change them while opening. The fixture leaves those wires disconnected.
-7. Preserve partial progress and original deadlines across EINTR/EAGAIN, Windows cancellation/completion races, and short reads/writes. A timeout returning no bytes is not serial EOF. Do not implement cancellation by freeing live buffers or racing descriptor close against an unknown I/O owner.
-8. VCP driver readback is labelled `driver_setting`; unavailable physical baud, latency timer and hardware counters are null. Reject requested rates above 12 Mbaud before configuration; driver rejection is `UNSUPPORTED_BAUD`, not a fallback to 9600 or another baud. A driver accepting a rate does not certify it. Do not use unbounded `tcdrain()`/FlushFileBuffers on the mandatory shutdown path or call a destructive purge “flush.” Where only bounded host-queue-empty status is available, report `host_empty`; unavailable stronger drain is explicit. Lab peer receipt supplies the delivery proof.
-
-**Gate:** standalone cable loopback, binary process tests, concurrent directions, cancellation and terminal restoration pass. High-rate OS-driver support is a measured capability, not a prerequisite to finishing ordinary console behavior.
-
-### Stage 3 — native Glasgow tool and device lifecycle
-
-**Depends on:** Stage 1 resources and Stage 2 shared session infrastructure. **Deliverable:** `guart` reaches the same console/stream contract without installed Glasgow or a build toolchain.
-
-1. Add native libusb ownership/event-loop code shared with the later FTDI USB backend. Statically link libusb into release executables and retain only OS-provided runtime/framework dependencies; use its asynchronous API for multiple in-flight transfers. Cancellation requests are asynchronous: keep buffers alive, inspect actual lengths, reap every completion, then release interfaces/handles. On macOS cancellation can affect every transfer on an endpoint; terminate/resynchronize that endpoint generation, never reuse freed state. A ZLP is not EOF. Do not call blocking management operations inside USB callbacks.
-2. Translate the current Glasgow API-9 contract from `hardware/device.py` and `firmware/fx2/glasgow_mgmt.h`, not from assumed serial-port behavior:
-   - VID/PID 20b7:9db1; API is descriptor high byte; revision is the low byte. Exact supported mappings are A0=0x10, B0=0x20, C0=0x30, C1=0x31, C2=0x32, C3=0x33, D0=0x40; preserve documented legacy decoding but reject unknown/zero revisions before choosing gateware. No automatic repair of Cypress/default-ID boards.
-   - Select one device before mutation and obtain exclusive ownership. For known pre-D0 API zero/mismatch, load only the bundled FX2 firmware into RAM: control OUT 0x40/request 0xA0/index 0, CPUCS 0xe600=1, decoded segments in <=4096-byte chunks, CPUCS=0, then bounded re-enumeration up to 10 seconds. Correlate serial/physical location, validate API/revision again, and fail after one failed provisioning attempt. Do not update every enumerated device.
-   - For D0 require compatible API 9 and the expected STM32 image already present in EEPROM 0x5000..0x51ff. After activating management in the next step, read it in <=32-byte chunks and compare against the bundled 512-byte resource before upload/power configuration. Missing/mismatched image or unsupported preboot API yields `PROVISIONING_REQUIRED`; do not add EEPROM writes or assume uploading FX2 RAM also supplies secondary-MCU firmware.
-3. Claim all required interfaces before configuration (Windows can reset configured interfaces when another is claimed). Avoid gratuitous SET_CONFIGURATION. Activate management interface 0/alternate 1 and keep IN 0x81 serviced while requests go to OUT 0x01. Requests/replies have `[serial:u8, opcode-or-result:u8, payload]`, maximum 64 bytes, one command at a time. Serial 0 is unsolicited alerts; normal serials 1..255 cannot be reused while live.
-   - Handle ACK=0, WAIT=1, ERROR=255, ALERT=2. On WAIT repeat the identical opcode/payload after 100 ms within the operation deadline, using a fresh serial and no unrelated management command between retries. Malformed responses, unknown live serials, reader failure, or a command timeout fail the session rather than leave a waiter hung or let a late reply satisfy another command.
-   - Default control/management command deadline is two seconds, FPGA-load operation deadline 30 seconds, firmware re-enumeration deadline ten seconds; an earlier whole-session deadline always wins. Ordinary shutdown cleanup gets two seconds after any separately bounded TX drain. A silent device must not hang an unlimited interactive session during open/close.
-   - Parse unsolicited alerts separately from UART data. Retrieve/acknowledge historical flags explicitly during startup; a current port fault aborts the session without auto-clearing/re-enabling the supply. Preserve the triggering error during cleanup.
-4. Validate embedded revision/profile/API/hash metadata and requested baud/divisor before upload or port enablement. After exclusive ownership and management activation, explicitly switch port A off before loading a new image; do not assume a previous application left it unpowered. Always load the selected embedded image for a new session to establish fresh state. Hold unused data interfaces OFF; select interface 1 alternate 3 for FPGA configuration, bulk-write raw bytes on EP2 while issuing `FPGA_LOAD_CFG` with length and ID, wait for both upload completion and ACK, then explicitly transition interface 1 to alternate 0. D0 depends on that CFG-to-OFF transition. Read health register 0 and require 0xa5 before enabling port A.
-5. Apply the fixed electrical profile using existing protocol semantics:
-   - GET_VLIMIT: zero means no persistent limit; reject a nonzero A limit below 3300 mV. Never change persistent limits.
-   - GET_IALERT on C2/C3/D0: retain a stricter nonzero threshold, otherwise set 100 mA before enabling A. Earlier boards lack that facility; report capability rather than issuing unsupported commands.
-   - SET_VSUPPLY mask 1, A=3300 mV; other entries zero under the mask. Do not energize unused ports. No voltage-sense window is assumed without a sense wire.
-   - On C0–D0 set A0 pull-high and other A pulls floating; pre-D0 expanders require Vio first. A0/B0 lack configurable pulls. Do not connect FTDI red to Glasgow power.
-6. Resolve and validate descriptor endpoints: single UART is IN interface 3/alternate 2 (expected EP0x86), OUT interface 1/alternate 2 (expected EP0x02), with interfaces 2/4 OFF. Streams carry raw UART bytes, **not COBS or FTDI status headers**. Start reading before accepting TX. After both data interfaces are active, configure manual divisor and use_auto=0 and read it back; either pipe reset invalidates baud and counters, so reset/start begins a new session epoch.
-   - Compute integer `round(clock_hz / requested_baud)` with ties-to-even; require 2..1048575. Use integer/rational arithmetic, not platform-dependent floating rounding. Reject >2% requested-versus-derived rate error as `UNSUPPORTED_BAUD`. Report actual nominal `clock_hz/divisor`; never write cycles-minus-one.
-   - Management numbers are little-endian, but FPGA_SET_REG values are big-endian and FPGA_GET_REG values little-endian. Derive register widths from the manifest.
-7. Implement drain with the new TX state: seal a writer barrier, submit pending data, await every OUT completion through it, then poll the atomic register until count equals successfully delivered-to-USB session bytes modulo 2^32 and idle is set. Bound outstanding traffic below 2^31. Failed/ambiguous partial output is an error, not a successful drain. A pipe reset invalidates the epoch/target and cannot be used to make a drain appear complete. Default drain deadline is a conservative 2x outstanding 8N1 wire-time estimate plus two seconds, bounded by any earlier session deadline.
-8. Graceful close keeps RX and management alive while draining; then cancels/reaps data I/O, sets data interfaces OFF, removes configured A pulls while access is valid, switches A supply off, and finally shuts down management and releases handles. Abort/disconnect uses bounded best-effort cleanup and reports losses/shutdown failures; never promise power-off after physical unplug. Do not restore an unrelated previous FPGA applet or write EEPROM.
-
-**Gate:** physical cross-device traffic works both ways, small final writes are not truncated, bad resources/faults do not enable unsafe I/O, and the same binary launches offline without Python or FPGA tools.
-
-### Stage 4 — C232HD direct-USB and controlled baud diagnostics
-
-**Depends on:** Stage 2 and Stage 3 step 1's shared USB implementation; then proceeds concurrently with Stage 3's Glasgow-specific protocol. **Deliverable:** opt-in high-rate/diagnostic backend in the existing `c232uart` executable.
-
-1. Implement `--backend usb` for verified FT232H identity; discover bulk endpoints and packet sizes. Claim only the selected interface. No automatic backend fallback or global driver changes. On Linux, explicit `--detach-kernel-driver` may detach only that interface and must reattach on exit. Windows WinUSB binding and macOS authorization/VCP conflicts are setup prerequisites; fail with `DRIVER_CONFLICT`/`PERMISSION_DENIED` and targeted guidance, never disable SIP or remove global drivers.
-2. Configure UART/reset bit mode, 8N1, disabled flow control, disabled event/error-character substitution, and deasserted RTS/DTR. Any startup discard is an explicit session boundary; never purge during normal traffic. Default direct-USB latency timer is 2 ms, with validated `--latency-ms 1..255` and readback; reject this option for VCP rather than pretend COMMTIMEOUTS controls the chip timer.
-3. Implement valid H-series baud-divisor encoding from the FTDI/Linux/libftdi references. Allow special divisors 1, 1.5, 2, then eighth-step divisors >=2; do not generate nonexistent subdivisions below 2. Choose the closest representable value; equal error chooses the lower actual baud. Enforce <=2% error and the cable's 12 Mbaud ceiling. Include golden USB encodings at channel index 1: 12 Mbaud -> value 0/index 0x0201, 8 Mbaud -> 1/0x0201, 6 Mbaud -> 2/0x0201. Report divisor-derived nominal speed, not measured speed or a context field that merely repeats the requested value.
-4. Decode each bulk-IN USB packet using descriptor maximum packet size, stripping its first two status bytes independently. Cover 64/512-byte max packets, combined transfers, short final packets and status-only packets. Preserve UART NUL/CR/LF and arbitrary binary data. Bulk OUT has no status prefix.
-5. Aggregate raw modem/line-status observations separately from payload. Recognize overrun/parity/framing/break/FIFO flags, but do not equate flag occurrences with damaged-byte counts; repeated/status-only observations are distinguished from error-bearing data packets. Under 8N1 there is no parity checking to promise. After all OUT transfers finish, a fresh modem-status transmitter-empty observation can return `device_empty`; stale IN status cannot establish drain.
-6. Reuse the same cancellation, queue, terminal and stream contracts. Record backend, driver binding, USB speed, actual configured latency, and rate provenance in every lab result. A missing direct-USB binding is `unavailable`, not an attempted electrical failure and not permission to substitute VCP silently.
-
-Primary protocol references: [Linux FTDI driver](https://raw.githubusercontent.com/torvalds/linux/master/drivers/usb/serial/ftdi_sio.c), [libftdi baud implementation](https://www.intra2net.com/en/developer/libftdi/documentation/ftdi_8c_source.html), [PyFtdi FTDI protocol source](https://raw.githubusercontent.com/eblot/pyftdi/master/pyftdi/ftdi.py), [Apple IOSSIOSPEED definition](https://raw.githubusercontent.com/apple-oss-distributions/IOSerialFamily/main/IOSerialFamily.kmodproj/ioss.h), [Windows DCB](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-dcb), and [libusb async I/O](https://libusb.sourceforge.io/api-1.0/group__libusb__asyncio.html). Pin source snapshots for golden vectors; do not blindly copy another project's implementation without preserving its license.
-
-### Stage 5 — automated correctness and physical validation
-
-**Depends on:** working executables for their respective cases; harness/parser work is language-independent. **Deliverable:** repeatable receiver-verifying tests of both shipped applications, not just Python reference mocks.
-
-1. Create development-only `uart-tools/lab.py`, `uart-tools/lab_protocol.py`, and `uart-tools/tests/`. Use Python 3.13+ standard-library subprocess/asyncio, hashing, CRC, JSON and unittest; Windows uses a subprocess-capable event loop. The harness spawns the real binaries in `stream --events-json` mode with separate stdin/stdout/stderr pipes and continuously services both output channels. It never imports a Python serial/Glasgow backend to bypass the products.
-2. Hardware commands require `--hardware`, explicit device serials, and `--wiring ftdi-loopback|glasgow-loopback|cross`. Acquire a cooperative per-pair OS lock for the entire run plus the backends' exclusive device ownership. No default CI hardware access, EEPROM writes, automatic driver switches, or cable rewiring by software.
-   - FTDI-only loopback: Glasgow disconnected, orange joined to yellow, red and other signal wires disconnected.
-   - Glasgow-only loopback: FTDI disconnected, A1 joined to A0; use the fixed 3.3 V profile.
-   - Cross: FTDI orange TX -> Glasgow A0 RX; FTDI yellow RX <- Glasgow A1 TX; black -> Glasgow GND; red unconnected. Both USB cables connect to the host. Do not additionally short TX/RX in cross mode.
-3. Lifecycle: enumerate identities; start both processes with deadlines and known expected RX byte counts; wait for both `ready` events before writing; establish fresh counter baselines. Keep independent readers and writers active. For each finite trial use a deadline of `max(30 seconds, 4 * longest planned directional wire time + 20 seconds)`, including both warmup and measured payload; use nominal baud when known, requested baud otherwise and label that estimate. Close stdin after all planned payload and wait for expected received data, drain reports and child exits. A deadline kills only owned children after bounded graceful cancellation; reap them and retain diagnostics. Reopen devices after cleanup. Never auto-replay a partly delivered failed trial.
-4. Raw binary validation uses `bytes(range(256))` plus `00 0a 0d 11 13 1a 03 04 1d 7e 2e ff`, deterministic pseudorandom data, and a final byte without newline. Exercise lengths 0, 1, 63, 64, 65, 511, 512, 513, 65535, 65536, 65537 and 1048576 with irregular chunking. Exact received bytes and counts must match; stdout must have no logs or packet headers. Run Glasgow->FTDI, FTDI->Glasgow and simultaneous independent duplex with different seeds/lengths.
-5. For sustained validation and benchmark traffic only, use a resynchronizable framed oracle in `lab_protocol.py`: magic `b"UARTLAB1"`, direction u8 (0=Glasgow->FTDI, 1=FTDI->Glasgow), three reserved zero bytes, sequence u32 little-endian, payload length u32 little-endian, payload, then CRC32 little-endian over header+payload. Header is 20 bytes, trailer four; maximum payload 65536. Payload is SHAKE256 of fixed-width little-endian `(seed:u64, direction:u8, sequence:u32)`, expanded to the declared length. This is a harness protocol, never added to console UART streams.
-   - Validate magic/length/CRC/direction/sequence and every generated payload. Track gaps, duplicates, reorder, corruption, unexpected bytes and first mismatch. Resynchronization is bounded; do not allocate from an untrusted length or count a damaged frame as verified bytes. Include dropped/inserted/corrupted/duplicated frames in parser unit tests to prove the oracle fails correctly.
-6. Add targeted native contract tests for partial I/O, timeouts with progress, indeterminate write failure/no replay, FTDI status on a non-first packet, status-only/ZLP handling, bytewise escape parsing, writer cancellation, simultaneous duplex and blocked stdout. Test transport doubles stay inside test binaries; no fake transport mode is shipped in the release tools.
-7. Add actual-process terminal tests using POSIX PTYs and Windows ConPTY/native console test infrastructure. Save modes before launch; verify normal escape, catchable cancellation, device error and disconnect restore them. Release binaries run physical tests; fake-backend process tests reuse the same console/session implementation without claiming USB qualification.
-8. Extend `software/glasgow/applet/interface/uart/test.py` and relevant gateware tests using existing simulation conventions: verify final-stop-bit completion, queued-byte-not-idle, TX count rollover near 0xffffffff, pipe-reset epoch invalidation, independent 32-bit error/overflow rollover and injected framing/overflow. Reuse `software/tests/gateware/test_uart.py` bit-level helpers. Do not delete/re-record the committed hardware fixture: `applet_v2_hardware_test` replays it and does not prove physical hardware.
-9. Negative physical cases include wrong baud, unplug during TX/RX/drain, another owner, missing permissions, and a downstream reader pause. No-flow-control buffering cannot guarantee losslessness under an arbitrarily long pause: require exact delivery below demonstrated capacity and explicit loss/overflow/bounded failure above it. Keep pure corruption-injection test results separate from electrically injected line errors; do not short outputs or require dangerous fault injection.
-
-**Gate:** 115200 cross-device validation passes in both directions and independent duplex on each target OS, with zero mismatches/duplicates/gaps and zero supported fresh error/overflow deltas. Unsupported counters remain null and do not manufacture a zero-error claim. Hardware-unavailable cases are blocked/unavailable, never successful skips.
-
-### Stage 6 — bandwidth, latency, and evidence-driven optimization
-
-**Depends on:** Stage 5 correctness at each tested baud/backend. **Deliverable:** machine-readable measurements plus a reproducible qualified-rate table, not an advertised unmeasured maximum.
-
-1. Add `lab.py bench`, `sweep`, and `latency`, using the same process/session/parser infrastructure. `bench --baud N` measures one rate; `sweep --bauds CSV` applies the same trial to each rate after correctness preflight. They share the command options shown in Verification. Modes are `g2f`, `f2g`, and `duplex`; echo is a separate latency mode where the harness reads FTDI stdout and writes the same bytes to FTDI stdin. The C232HD does not autonomously echo. One outstanding request at a time is mandatory for latency measurements.
-2. Initial baud sweep: 115200, 921600, 1000000, 2000000, 3000000, 6000000, 8000000, 12000000. Stop/reopen both sessions between rates so no bytes cross epochs; quiesce before configuration. Record `passed`, `unsupported`, `unavailable`, or `failed` distinctly. Known Glasgow/FTDI nominal rates differing by >2% of the slower nominal rate are unsupported for the pair. VCP's unknown physical baud remains unknown even if data passes. Do not silently reduce a requested rate or omit a failed row. Continue a sweep after a per-rate failure only after both sessions have been safely closed/reopened; do not repeat the failed traffic automatically. Return nonzero if any trial unexpectedly failed or no baseline trial could run; unsupported higher rates alone do not fail a sweep whose baseline passed. Highest qualified rate means only the highest rate in this tested set that passed all specified checks for that recorded fixture/backend.
-3. Bandwidth baseline uses 4096-byte frame payloads, a separate approximately two-second warmup transfer, approximately 30 seconds of measured line-rate traffic, and three repetitions per direction/rate. For a finite test compute frame count as `ceil(requested_baud * seconds / (10 * (payload_size + 24)))`; actual elapsed time, not requested duration, is the denominator. This fixes expected byte counts before process launch and permits bounded automatic completion.
-   - Run warmup and measured traffic in the same processes; `--rx-bytes` includes their combined totals. Wait until all warmup frames have been verified in every active direction, snapshot diagnostic counters, then release measured writers. Keep stdin open between phases and do not reset pipes/counters. The measurement interval is not a new hardware session.
-   - Start the coordinator monotonic timer immediately before releasing the measured writers; stop each direction's timer when its last complete expected frame is verified. Include all tail/drain time needed for that delivery; do not count queued-but-unreceived bytes.
-   - Report verified useful payload B/s, verified UART frame bytes B/s, per-direction elapsed time, and clearly labelled aggregate duplex useful B/s. Wire utilization uses transmitted 8N1 frame bytes against nominal baud/10 when nominal baud is known; VCP requested-rate normalization is separately labelled.
-   - Every received frame is validated during the measurement. A mismatch, deadline, software drop or fresh supported error invalidates that trial; preserve its evidence rather than promote a high partial rate.
-4. Latency runs request lengths 1, 16, 64, 512, 4096 bytes, 20 warmups then 200 measured round trips, with byte-exact echo checking. Start timing immediately before each request is written and stop after its complete matching echo is received. Per-request deadline is `max(2 seconds, 4 * round-trip 8N1 wire time)`; the whole-trial deadline also covers all sequential request/response serialization. Report p50/p95/p99/max plus failures/timeouts. Include wire serialization and host/USB/echo overhead; these are not timestamped UART-edge measurements. An additional baseline in-memory/subprocess loop validates harness accounting but cannot substitute for hardware numbers.
-5. Emit exclusive-create JSON report files (`--output FILE`; fail if present) with schema version 1, timestamp, tool/resource/source versions, host OS/architecture, both identities/revisions, backend/driver/access mode, USB speed/topology when discoverable, requested/configured/nominal/measured baud with provenance, settings, payload/frame counts, verified/error counts, drain levels, timestamps/durations, statistics and qualification outcome. Measured physical baud is null unless an external timing measurement was actually supplied; retain its method/evidence when supplied. Missing observability remains null.
-6. Establish the baseline before tuning. Expose developer-only command options in the stream CLI for `--usb-transfer-bytes` (512..65536, packet-size aligned) and `--usb-queue-depth` (1..32), validated with a total per-direction queue+transfer budget <=8 MiB; reject them on VCP. Compare transfer sizes 512/4096/16384/65536 and queue depths 1/4/8/16 one axis at a time. For FTDI USB compare latency timers 1/2/16 ms. Record settings for every run; do not silently change defaults mid-sweep.
-7. Test controlled source pauses and consumer pauses of 1/10/100/1000 ms, separately identifying process-stdout backpressure versus transport receive-submission stalls. Assert bounded buffers and correct loss reporting; do not require impossible losslessness without RTS/CTS. Verify the opposite direction still progresses during a one-sided source pause.
-8. Only optimize demonstrated bottlenecks: copies/allocations, too-small writes, event-loop starvation, transfer batching, flush cadence, or buffering. Rerun exact correctness cases after each changed path and compare matched-hardware baselines. Do not add RTS/CTS, alter UART sampling, or remove CR/LF flushing merely to improve a number without a demonstrated defect. No fixed percentage-of-line-rate performance pass threshold is invented before measurement; acceptance is truthful, reproducible receiver-verified results and a documented best tested configuration.
-
-### Stage 7 — four-target standalone releases and qualification
-
-**Depends on:** native language gate and feature stages; release scaffolding can start earlier, final qualification cannot. **Deliverable:** two single-file native executables for each target plus evidence.
-
-1. Add `.github/workflows/uart-tools.yml` rather than replacing existing `.github/workflows/main.yml`. Existing CI is primarily Linux Python/synthesis/wheel work and its UART hardware fixture is replay, not an attached-device test.
-2. Run one pinned Linux resource-generation job and share the same immutable firmware/bitstream artifacts across all native targets. Native matrix builds macOS ARM64, Linux x86-64, Linux ARM64, Windows x86-64. Fixed initial runtime baselines: macOS 14+, Linux glibc 2.35+ (Ubuntu 22.04 baseline), Windows 11 x86-64. Record compiler, SDK, libusb and source versions; consume lockfiles/frozen resources. Cross-compilation is allowed for production, but execute smoke tests on the actual target architecture.
-3. `build.py build --language LANGUAGE --target TARGET` creates `uart-tools/dist/TARGET/guart` and `c232uart` (Windows `.exe`). It embeds resources and statically links libusb; no adjacent non-system dylib/so/DLL, helper executable, extracted Python environment, or resource directory is required to run. Rust uses its normal target build; Go enables cgo and the matching target C toolchain for static libusb. Fail if native dependency inspection finds an unbundled non-system runtime dependency; do not weaken the single-file contract to a directory distribution.
-4. Include license text through `--licenses`. Statically linking LGPL-2.1 libusb requires the corresponding notices/source and relinking materials with the release's development artifacts; single-file runtime distribution does not remove that obligation. [libusb license](https://raw.githubusercontent.com/libusb/libusb/master/COPYING) is the governing reference. Do not introduce a proprietary D2XX distribution dependency.
-5. `build.py smoke` tests copied executables alone in a clean, offline environment without Python, Glasgow, FPGA tools, or globally installed libusb: help/version/license/list, empty-device behavior, invalid inputs, then hardware behavior on provisioned hosts. The smoke orchestrator can be external; the copied executables cannot invoke it. Package Unix binaries in tar archives and Windows binaries in zip archives for delivery; each extracted tool still runs as one file. Release signatures/notarization use provisioned signing credentials; unsigned development artifacts must not be represented as signed/notarized releases.
-6. Provision device permissions and selected driver bindings outside the application. Glasgow advertises WinUSB compatibility; test both its normal and RAM-reenumeration states. FTDI VCP and direct-USB bindings are separate manually provisioned runs, not hot-switched benchmark cases. Linux hardware runners need appropriate scoped service-user access, not blanket permissions; macOS direct-USB capture may require authorization. Do not change unrelated devices.
-7. Keep a qualification matrix separating resource-built, simulated, executable-smoke-tested, and physically-qualified states for OS/architecture, hardware revision, FTDI backend and baud. Require full physical baseline correctness on all four target artifacts before declaring cross-platform completion. Higher rates and additional revisions receive only the claims demonstrated by their evidence. If a runner/device/signing credential is unavailable, finish reachable artifacts but leave that acceptance row explicitly blocked; do not mark it passed using a mock, cross-compile, or Python replay.
-8. After standalone runtime smoke passes, update the existing root `README.md` with the native commands, fixed profile/wiring, language/build requirements, driver/provisioning boundaries, and qualification-report location. Keep detailed operational switches in each executable's `--help`; document `get_tx_state()` and `export_manifest()` at their source definitions. Remove implementation-only throwaway reproducers/artifacts, not the permanent lab harness or behavior regression tests. Do not add a second set of general Glasgow installation instructions.
-
-### Stage dependencies and parallel execution
-
-- Stage 0 supplies external contracts and the user language gate.
-- Stage 1 resources/simulation and Stage 5 harness/parser groundwork are language-independent.
-- After the language decision, Stage 2 console/VCP implementation can run concurrently with Stage 1.
-- Stage 3 Glasgow protocol and Stage 4 FTDI USB can proceed independently after the shared session/USB boundary is fixed; assign one owner to shared session/USB mutations.
-- Physical Stage 5 waits for the corresponding real binaries and correct wiring. Stage 6 waits for per-rate correctness. Stage 7 final claims wait for its complete validation matrix.
-
-## Critical files and anchors
-
-Re-read these before implementation; line numbers from planning are hints, not edit coordinates.
-
-1. `firmware/fx2/glasgow_mgmt.h`, framing and `mgmt_packet` — 64-byte management messages, WAIT semantics, register/port payloads and alert layout; do not replace this with USB control-request guesses.
-2. `software/glasgow/gateware/registers.py:I2CRegisters.elaborate` — atomic register snapshot and asymmetric read/write byte order make the proposed TX status meaningful.
-3. `software/glasgow/hardware/assembly.py:HardwareAssembly.start/artifact` — claim-order/reset/endpoint behavior and the reason the current prebuilt path is not a native runtime solution.
-4. `firmware/fx2/stm32.c:mcu_bootload` — D0 reads secondary firmware from EEPROM 0x5000; FX2 RAM upload alone cannot satisfy this prerequisite.
-5. `software/glasgow/applet/__init__.py:applet_v2_hardware_test` — a present fixture replays instead of touching hardware; native release qualification must not use that as physical proof.
-
-## Verification
-
-All commands below are for implementation/execution, not actions taken during planning. New `uart-tools/` commands are specified deliverables. Root-relative commands run from the repository root; Python commands use an already-provisioned Python >=3.13 environment with this checkout's Glasgow package/dependencies. Build commands additionally need the selected native/C compiler and pinned FPGA toolchain. Hardware commands need explicit serials, correct wiring and OS access; obtain IDs through the new `list` commands, not hardcoded examples.
-
-### Reference and new gateware checks
-
-From `software/` in the PDM environment:
-
-```sh
-pdm run python -m unittest -v tests.gateware.test_uart
-pdm run python -m unittest -v glasgow.applet.interface.uart.test
-pdm run glasgow test uart
+```mermaid
+flowchart LR
+    B[bin/b or bin/b.bat] --> G[gateware/build_uart.py]
+    G --> R[target/glasgow-uart C0-C3 resources]
+    R --> C[Cargo build.rs validation and embedding]
+    C --> Q[guart]
+    C --> F[c232uart]
+    Q --> M[Glasgow API-9 management]
+    M --> U[queued native USB UART]
+    F --> V[exclusive OS VCP]
+    F --> D[explicit FTDI direct USB]
+    Q --> S[shared bounded full-duplex session]
+    V --> S
+    D --> S
 ```
 
-Expected: existing loopback/parity/two-stop-bit cases remain valid; new drain/error/timing cases pass; fixture replay is labelled replay. Resource generation must fail on missing synthesis tooling rather than accepting skipped synthesis as a release pass.
+The session layer owns cancellation, bounded buffering, RX/TX workers, terminal restoration, drain/idle semantics, byte counters, and NDJSON event emission. Backend code owns device selection, configuration, USB or serial transfers, hardware counters, and physical drain detection.
 
-From repository root in the same provisioned environment:
+## Build and resource trust
 
-```sh
-python uart-tools/build_resources.py --output uart-tools/resources --revisions A0 B0 C0 C1 C2 C3 D0
-python -m unittest discover -s uart-tools/tests -p 'test_*.py' -v
-```
-
-New-behavior proofs: USB completion before UART acceptance must not satisfy the TX drain barrier; after UART acceptance, idle remains false until the final stop bit. A later queued byte prevents premature drain. Counter transition 0xfffffffe -> 1 produces delta 3. A 48 MHz/115200 request selects divider 417 and nominal 115107.913669... baud. A 30 MHz/115200 request selects divider 260 and nominal 115384.615384... baud. Half-tie vectors are 48 MHz/768000 = 62.5 -> divider 62, and 48 MHz/256000 = 187.5 -> divider 188. Verify bit spacing, not just a copied register value. A/B metadata and generated clock constraints must agree at 30 MHz.
-
-### Native and process checks
-
-`LANGUAGE` below is supplied by the separate user decision, never chosen by a build script. Run these for each of `macos-arm64`, `linux-x86_64`, `linux-arm64`, `windows-x86_64`, using the matching target host for execution:
+Use only the repository wrappers:
 
 ```sh
-python uart-tools/build.py build --language LANGUAGE --target TARGET
-python uart-tools/build.py test --language LANGUAGE --target TARGET
-python uart-tools/build.py smoke --language LANGUAGE --target TARGET
+bin/envy sync
+bin/b
+bin/b --release
 ```
 
-Expected: binary/terminal/protocol tests pass; help/version/list work offline without application-side prerequisites; missing hardware is a bounded stderr error, not a hang. Test ELF/Mach-O/PE dependencies and runtime file/process access. A real disconnect restores terminal state, exits nonzero, and permits later reopening. Invalid profile/hash/revision/baud fails before enabling I/O. Protocol tests include malformed/short management replies, unsolicited alerts, late replies, WAIT retries, endian vectors, FTDI multi-packet status stripping, cancellation races, and no replay of ambiguous writes.
+Windows equivalents are `bin\envy.bat`, `bin\b.bat`, and `bin\r.bat`.
 
-### Physical correctness and performance commands
+`bin/b` first runs `gateware/build_uart.py` under the uv-locked gateware environment, then invokes Cargo. The generator is pinned to Glasgow commit `b2a15e9c797b90167d96257a557218ddb7984e71`. Its content address covers the lockfile, project inputs, profile, supported revisions, and pinned upstream commit. Unchanged inputs reuse `target/glasgow-uart`.
 
-Use `EXE_G`/`EXE_F` as paths to the built native tools and `G_SERIAL`/`F_SERIAL` as observed device serials. Pass actual values (including `.exe` on Windows); these labels are command placeholders, not literal serial numbers.
+The generated resources are one manifest, one FPGA bitstream, and one Cypress FX2 firmware image for each of C0, C1, C2, and C3. `build.rs` does not invoke Python. It rejects missing revisions, extra revisions, unsupported schema/profile values, and digest mismatches before embedding the resources in each executable. Runtime validation repeats the manifest and SHA-256 checks before touching a selected Glasgow.
+
+The fixed Glasgow UART profile is:
+
+- port A only;
+- A0 is RX input and A1 is TX output;
+- 3.3 V I/O rail;
+- 8 data bits, no parity, 1 stop bit;
+- no hardware flow control;
+- one bidirectional pipe;
+- 20-bit baud divisor;
+- saturating 32-bit RX error and RX overflow counters;
+- TX state with an idle bit and FIFO-level field.
+
+## Command-line contract
+
+Discover commands and all current options with `--help`:
 
 ```sh
-python uart-tools/lab.py validate --hardware --wiring cross --guart EXE_G --c232uart EXE_F --glasgow-serial G_SERIAL --ftdi-serial F_SERIAL --ftdi-backend vcp --baud 115200 --output uart-validation-vcp.json
-python uart-tools/lab.py validate --hardware --wiring cross --guart EXE_G --c232uart EXE_F --glasgow-serial G_SERIAL --ftdi-serial F_SERIAL --ftdi-backend usb --baud 115200 --output uart-validation-usb.json
-python uart-tools/lab.py sweep --hardware --wiring cross --guart EXE_G --c232uart EXE_F --glasgow-serial G_SERIAL --ftdi-serial F_SERIAL --ftdi-backend usb --bauds 115200,921600,1000000,2000000,3000000,6000000,8000000,12000000 --directions g2f,f2g,duplex --warmup-seconds 2 --seconds 30 --repeats 3 --payload-size 4096 --output uart-sweep.json
-python uart-tools/lab.py latency --hardware --wiring cross --guart EXE_G --c232uart EXE_F --glasgow-serial G_SERIAL --ftdi-serial F_SERIAL --ftdi-backend vcp --baud 115200 --sizes 1,16,64,512,4096 --warmup-count 20 --count 200 --output uart-latency.json
+bin/r guart --help
+bin/r c232uart --help
 ```
 
-Do not run the USB-backend commands against a cable still owned by an incompatible serial driver; provision that backend explicitly. Repeat sweep/latency with the VCP/USB backend as appropriate and include each backend's capabilities. Harness parser/accounting self-tests must pass first. Reports require exact receiver counts/checksums; a lost final byte, injected corruption, or timeout produces nonzero status and a failed record. 8N1 ceilings are 11,520 B/s at 115200, 300,000 B/s at 3 Mbaud, 600,000 B/s at 6 Mbaud, and 1,200,000 B/s at 12 Mbaud per direction; useful framed payload is lower. Duplex aggregate is labelled and never substituted for a per-direction figure.
+Both tools expose:
 
-Measure physical UART bit time with a suitable analyzer/scope for baud certification, especially A/B clock correction and highest working rates. Device configuration and same-device loopback alone do not measure clock accuracy. No fixed high-rate pass claim is required when the device/backend cannot support it; an honest unsupported/failed result and the last validated rate are required.
+- `list`: passive discovery only. It never claims a device, uploads firmware, configures an FPGA, detaches a driver, or changes device state.
+- `console`: raw interactive terminal operation. Ctrl-\\ requests a clean stop; terminal state is restored on every exit path.
+- `stream`: copies stdin to UART and UART to stdout without text translation.
 
-## Assumptions and user-controlled prerequisites
+Common defaults are 115200 bit/s, a 2 s stream timeout, and a 5 s final drain timeout. Supported requested rates are 9600 through 12,000,000 bit/s. Selection by serial is stable; ambiguous or absent selection fails instead of choosing an arbitrary device. `c232uart` defaults to `--backend vcp`; direct USB requires `--backend usb`. Backend-conflicting options are rejected.
 
-- **Language is intentionally not selected.** A separate user decision supplies Rust or Go; the chosen implementation then locks its supported toolchain/dependencies. Until that decision only language-independent stages may execute. This is an explicit execution gate, not a decision delegated to an implementer.
-- The requested console/testing target is fixed 3.3 V, 8N1, Glasgow A0 RX/A1 TX. General pin/framing/flow-control configurability would require a user-directed scope change and additional resource/test contracts, not an implementer's spontaneous extension.
-- OS versions/architectures are the four concrete targets above. If broader legacy OS or architecture support is desired, revise this matrix before release implementation; do not claim untested targets.
-- Development Python/FPGA tools are acceptable; released applications are native single files. Drivers, device permissions and D0 pre-provisioned secondary firmware are external hardware/OS prerequisites. Failure of those prerequisites is reported without automatic persistent repair.
-- Direct-USB access is explicitly opt-in and may need manual driver/authorization setup. If unavailable, the user can choose the VCP run explicitly; the harness does not substitute it inside a requested direct-USB trial.
-- Signing credentials and physical hardware hosts are supplied by the user/release environment. Missing access leaves only those proof/release rows blocked; builds, simulations and all other reachable work continue without fabricating hardware results.
-- No minimum bandwidth percentage or 12 Mbaud success is promised in advance. The deliverable is correct console operation, accurate diagnostics, and reproducible validation/performance evidence across the selected matrix.
+Stable process exit codes:
 
+| Code | Meaning |
+| ---: | --- |
+| 0 | Success |
+| 2 | CLI or device-selection error |
+| 3 | Access denied or device busy |
+| 4 | Protocol or embedded-resource error |
+| 5 | Timeout or cancellation |
+| 6 | Validation mismatch |
+
+Payload bytes use stdout only. Human diagnostics use stderr. `--event-log PATH` writes schema-versioned NDJSON records containing monotonic time, tool, backend, selected identity/path, requested and actual baud, phase, byte counters, hardware counters, and optional error text.
+
+## Device ownership and transport behavior
+
+### Glasgow
+
+Passive discovery recognizes only normal Glasgow VID:PID `20b7:9db1`. Bare Cypress `04b4:8613` devices are reported only as recovery candidates; the tool never claims, uploads to, or mutates them automatically.
+
+After explicit selection, `guart` validates the embedded revision resource, performs the pinned API-9 management sequence, configures the matching C0-C3 bitstream, sets the fixed electrical profile, and claims only the manifest-declared pipe interfaces and endpoints. Host RX and TX each use eight queued 32 KiB transfers. Shutdown waits for host queues, gateware FIFO state, and UART idle, then disables port-A VIO. Re-enumeration waits are bounded to 10 s and preserve serial and USB topology identity.
+
+### C232HD VCP
+
+VCP discovery requires VID:PID `0403:6014` and exact product `C232HD-DDHSP-0`. Linux selection correlates USB identity with `/dev/serial/by-id` and sysfs rather than accepting arbitrary tty devices. The port is opened exclusively, configured for 8N1 with flow control disabled and DTR/RTS inactive, and drained through the OS output-queue contract.
+
+### C232HD direct USB
+
+Direct USB is opt-in. It requires the same VID, PID, and exact product string. The backend detaches only the selected interface's kernel driver, claims it, performs FTDI reset/purge/latency/baud/line/flow/modem-control configuration, discovers endpoints from descriptors, and restores the kernel driver on every drop or error path.
+
+RX strips each FTDI two-byte modem/status header independently for every 512-byte or short USB packet and accumulates overrun, parity, framing, and break indications. Eight 32 KiB RX requests and eight 32 KiB TX requests remain in flight. Final drain uses the FTDI TEMT state rather than host submission alone.
+
+## Full-duplex and shutdown invariants
+
+- RX and TX make progress independently.
+- Internal buffers are bounded to 64 KiB; sustained backpressure cannot grow memory without limit.
+- Interrupted, would-block, timed-out, short, and partial transfers preserve all completed bytes and retry only unfinished work.
+- EOF stops new TX but continues RX until idle/drain completion.
+- Cancellation stops new input, drains submitted TX within the configured bound, cancels outstanding backend work, joins both workers, emits the final event, and restores terminal/driver/device state.
+- No worker thread is detached.
+
+## External validation
+
+`tools/lab.py` is a process-level harness. It imports no Rust internals and launches only `target/debug/guart` and `target/debug/c232uart`. It covers empty payloads, every byte value, CR/LF/NUL content, transfer-boundary crossings, sustained traffic, simultaneous independent bidirectional payloads, both C232 backends, and all requested rates.
+
+Example after hardware setup:
+
+```sh
+bin/b
+bin/uv run --project gateware --frozen python tools/lab.py \
+  --guart-serial GLASGOW_SERIAL \
+  --c232-serial FT61SVEW \
+  --rates 9600,115200,1000000,12000000 \
+  --payload-size 8388608 \
+  --json-report target/lab-report.json
+```
+
+A case passes only when both subprocesses exit cleanly, opposite RX byte counts and SHA-256 digests exactly match the independent TX corpora, the reported actual rate is within 2%, and hardware error/overflow counters are zero.
+
+## Hardware qualification
+
+### Current fixture
+
+- C232HD-DDHSP-0 serial: `FT61SVEW`.
+- USB identity: `0403:6014`, product `C232HD-DDHSP-0`.
+- Current tty: `/dev/ttyUSB0`.
+- Stable VCP path: `/dev/serial/by-id/usb-FTDI_C232HD-DDHSP-0_FT61SVEW-if00-port0`.
+- Current C232HD state: normal-user VCP and direct-USB open/close paths pass; direct USB restores the kernel driver and stable VCP path after exit. Both backends pass the quick matrix through 3,000,000 bit/s with zero C232 error/overflow counters.
+- Current Glasgow state: normal Glasgow `20b7:9db1`, serial `C3-20240903T135215Z`, revision C3, API level 9, discovery path `003`. A 65,536-byte A1-to-A0 loopback passes exactly at requested 115,200 bit/s (actual 115,107) with zero RX errors and overflow.
+- Current wiring: FTDI orange TXD to Glasgow A0, FTDI yellow RXD to Glasgow A1, and FTDI black to Glasgow ground. FTDI red and Glasgow VIO are isolated.
+
+### Recorded quick-matrix result
+
+The selected qualification used all five harness corpora with a 65,536-byte sustained payload rather than the default 16 MiB payload. `target/uart-lab-quick.json` is the machine-readable record. Empty, every-byte, CR/LF/NUL, 64 KiB boundary-crossing, and 64 KiB sustained cases all pass bidirectionally for VCP and direct USB at 9,600, 115,200, 1,000,000, and 3,000,000 bit/s. Startup bytes are discarded only after each receiver remains quiet for 250 ms. Glasgow holds TX idle for 100 ms before disabling port-A VIO so the peer cannot decode the rail transition as payload.
+
+At 12,000,000 bit/s, the empty case passes, but each non-empty C232-to-Glasgow case fails with Glasgow RX framing errors and corresponding byte loss. Glasgow-to-C232 traffic remains byte-exact with zero C232 errors and overflow through both backends. This directional result, plus success at 3,000,000 bit/s through the same wiring, identifies a fixture/electrical limit rather than a hidden software pass. The harness preserves the failed cases and counters; it does not suppress or reclassify them.
+
+### Bounded Glasgow enumeration
+
+Keep every flying lead disconnected. Observe the power and FX2 LEDs. Replace the current hub path with one known-good data cable connected directly to a host port, wait 10 s, and inspect USB/kernel attach events. Change one variable per trial: cable, then host port, then another host if available.
+
+Classify `20b7:9db1` as normal Glasgow. Classify `04b4:8613` only as a Cypress recovery candidate and stop for a deliberate official recovery procedure. If bounded substitutions produce no attach event, record LEDs, cable, port, host, and kernel-log evidence and stop. Do not rewrite EEPROM, use boot jumpers, inject voltage, or attempt native firmware recovery.
+
+After normal enumeration, record the serial and exact revC stepping. Use the matching board manual and connector pin-1 marking. For a standard revC3 port-A connector, the authoritative nets are A0/IO0 on pin 3 (official orange loom), GND on pin 4 or 6 (official black loom), and A1/IO1 on pin 5 (official green loom). Never apply revC3 pin numbers or infer connector orientation on an unidentified or modified board.
+
+### Linux local-access rules
+
+Install these rules deliberately as `/etc/udev/rules.d/69-glasgow-tool.rules`; the filename must sort before systemd's `73-seat-late.rules`, which applies the `uaccess` tag. A `99-*` filename tags the device too late to grant the active session ACL. The binaries never install permissions:
+
+```udev
+SUBSYSTEM=="usb", ATTR{idVendor}=="20b7", ATTR{idProduct}=="9db1", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", TAG+="uaccess"
+```
+
+Reload rules and replug, or deliberately retrigger only these fixtures, during intentional setup. Confirm the resulting device-node ACL explicitly. Do not grant generic Cypress `04b4:8613` access, and do not infer access from group membership or enumeration alone.
+
+### Endpoint qualification
+
+Qualify each endpoint before cross-wiring:
+
+1. FTDI loopback: connect FTDI orange TXD to FTDI yellow RXD, isolate every other colored lead, validate both VCP and direct-USB backends, then remove the loop.
+2. Glasgow loopback: configure port A at 3.3 V, connect A1 TX to A0 RX, validate, disable VIO and the applet, then remove the loop.
+
+### Cross-device wiring
+
+Make or change connections only while both USB cables are unplugged.
+
+| C232HD-DDHSP-0 lead | FTDI signal | Glasgow port-A net | Standard revC3 connector / official loom |
+| --- | --- | --- | --- |
+| **Orange** | TXD output | **A0 / IO0**, Glasgow RX | **Pin 3 / orange loom** |
+| **Yellow** | RXD input | **A1 / IO1**, Glasgow TX | **Pin 5 / green loom** |
+| **Black** | GND | **GND** | **Pin 4 or 6 / black loom** |
+| **Red** | +3.3 V output | **No connection** | Insulate individually |
+| Green | RTS output | **No connection** | Insulate individually |
+| Brown | CTS input | **No connection** | Insulate individually |
+| Grey | DTR output | **No connection** | Insulate individually |
+| Purple | DSR input | **No connection** | Insulate individually |
+| White | DCD input | **No connection** | Insulate individually |
+| Blue | RI input | **No connection** | Insulate individually |
+
+With the official Glasgow loom: FTDI orange to Glasgow orange, FTDI yellow to Glasgow green, and FTDI black to one Glasgow black ground wire. This crossing is intentional: each transmitter reaches the other receiver.
+
+Leave Glasgow pin 1 SENSE, pin 2 VIO, every unused A signal, and all of port B physically unconnected. Glasgow configures its own port-A rail to 3.3 V; never join that rail to the FTDI red lead. Connect ground first, then orange-to-A0, then yellow-to-A1. Check continuity and confirm no red/VIO connection before reconnecting USB. Unplug both USB cables before later rewiring. Do not otherwise color-match the looms: FTDI green is RTS, while Glasgow green is A1.
+
+## Release qualification
+
+Run, in order:
+
+1. Rust protocol/session/resource tests.
+2. Gateware resource tests.
+3. `guart list --json` and `c232uart list --json` without elevated privileges.
+4. FTDI VCP loopback.
+5. FTDI direct-USB loopback and post-run driver restoration.
+6. Glasgow loopback.
+7. Cross-device `tools/lab.py` matrix.
+8. Linux release build and package smoke test in an environment without Python.
+9. Native Windows and macOS compile/package CI jobs.
+
+Only artifacts produced after all applicable hardware checks pass are hardware-qualified. Each per-tool archive contains one executable and `THIRD_PARTY_NOTICES.txt`; `SHA256SUMS` authenticates the archives.

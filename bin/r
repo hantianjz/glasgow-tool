@@ -2,10 +2,18 @@
 set -Eeuo pipefail
 
 script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-binary="$script_dir/../target/debug/glasgow-tool"
+
+if [[ $# -eq 0 || ( "$1" != "guart" && "$1" != "c232uart" ) ]]; then
+    echo "usage: bin/r {guart|c232uart} [arguments...]" >&2
+    exit 2
+fi
+
+tool="$1"
+shift
+binary="$script_dir/../target/debug/$tool"
 
 if [[ ! -x "$binary" ]]; then
-    echo "ERROR: glasgow-tool is not built; run bin/b first" >&2
+    echo "ERROR: $tool is not built; run bin/b first" >&2
     exit 1
 fi
 

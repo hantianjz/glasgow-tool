@@ -11,10 +11,11 @@ No global Envy, Rust, or Python installation is required. The committed wrappers
 ```sh
 bin/envy sync
 bin/b
-bin/r
+bin/r guart --help
+bin/r c232uart --help
 ```
 
-Windows equivalents are `bin\envy.bat sync`, `bin\b.bat`, and `bin\r.bat`.
+Windows equivalents are `bin\envy.bat sync`, `bin\b.bat`, `bin\r.bat guart --help`, and `bin\r.bat c232uart --help`.
 
 Pinned tools can be invoked directly through `bin/`, for example:
 
@@ -24,3 +25,14 @@ bin/rustc --version
 bin/python3 --version
 bin/uv --version
 ```
+
+`bin/b` generates and embeds the pinned Glasgow revC resources before building both Rust binaries. Runtime use does not require Python. See [`docs/uart-plan.md`](docs/uart-plan.md) for the CLI contract, device matching, safe wiring, permissions, and hardware-qualification procedure.
+
+Create deterministic per-tool Linux release archives and checksums with:
+
+```sh
+bin/b --release --locked
+bin/uv run --project gateware --frozen python tools/package.py
+```
+
+Native Windows and macOS packages are built by `.github/workflows/release.yml`. Release archives include `THIRD_PARTY_NOTICES.txt`.

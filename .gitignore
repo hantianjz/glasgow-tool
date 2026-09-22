@@ -2,3 +2,4 @@
 .envy-cache-*
 target/
 gateware/.venv/
+*.pyc

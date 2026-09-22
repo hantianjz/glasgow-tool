@@ -5,6 +5,33 @@ edition = "2024"
 rust-version = "1.98"
 publish = false
 
+[lib]
+name = "glasgow_tool"
+
+[[bin]]
+name = "guart"
+path = "src/bin/guart.rs"
+
+[[bin]]
+name = "c232uart"
+path = "src/bin/c232uart.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+ctrlc = "3"
+nusb = "=0.2.7"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = { version = "=4.10.1", default-features = false }
+sha2 = "0.10"
+thiserror = "2"
+
+[build-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+
 [lints.rust]
 unsafe_code = "forbid"
 

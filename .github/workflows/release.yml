@@ -1,0 +1,46 @@
+name: Native release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build release binaries
+        if: runner.os != 'Windows'
+        run: ./bin/b --release --locked
+      - name: Build release binaries on Windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: bin\b.bat --release --locked
+      - name: Package release binaries
+        if: runner.os != 'Windows'
+        run: ./bin/uv run --project gateware --frozen python tools/package.py
+      - name: Package release binaries on Windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: bin\uv.bat run --project gateware --frozen python tools\package.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: glasgow-tool-${{ matrix.platform }}-${{ runner.arch }}
+          path: target/dist/*
+          if-no-files-found: error

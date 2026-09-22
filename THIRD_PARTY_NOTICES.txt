@@ -1,0 +1,358 @@
+THIRD-PARTY NOTICES
+===================
+
+This distribution contains software and generated hardware resources from third parties. Cargo.lock and gateware/uv.lock are the authoritative version inventories. Source is available from the repositories listed below or the registry identity recorded by the lockfile.
+
+Embedded Glasgow resources
+--------------------------
+
+The embedded C0-C3 FPGA bitstreams and Cypress firmware are generated from Glasgow Interface Explorer software at commit:
+
+  https://github.com/GlasgowEmbedded/glasgow/tree/b2a15e9c797b90167d96257a557218ddb7984e71
+
+Glasgow software declares the license expression 0BSD OR Apache-2.0. Its copyright and license texts are available at that pinned source revision. The build environment also uses Amaranth and the YoWASP Yosys/nextpnr toolchain recorded in gateware/uv.lock. Those build tools are not shipped as runtime executables.
+
+Rust dependencies
+-----------------
+
+anstream 1.0.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+anstyle 1.0.14
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+anstyle-parse 1.0.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+anstyle-query 1.1.5
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+anstyle-wincon 3.0.11
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+bitflags 1.3.2
+  License: MIT/Apache-2.0
+  Source: https://github.com/bitflags/bitflags
+bitflags 2.13.2
+  License: MIT OR Apache-2.0
+  Source: https://github.com/bitflags/bitflags
+block-buffer 0.10.4
+  License: MIT OR Apache-2.0
+  Source: https://github.com/RustCrypto/utils
+block2 0.6.2
+  License: MIT
+  Source: https://github.com/madsmtm/objc2
+bumpalo 3.20.3
+  License: MIT OR Apache-2.0
+  Source: https://github.com/fitzgen/bumpalo
+cfg-if 1.0.5
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/cfg-if
+cfg_aliases 0.2.2
+  License: MIT
+  Source: https://github.com/katharostech/cfg_aliases
+clap 4.6.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/clap-rs/clap
+clap_builder 4.6.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/clap-rs/clap
+clap_derive 4.6.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/clap-rs/clap
+clap_lex 1.1.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/clap-rs/clap
+colorchoice 1.0.5
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-cli/anstyle.git
+convert_case 0.10.0
+  License: MIT
+  Source: https://github.com/rutrum/convert-case
+core-foundation 0.10.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/servo/core-foundation-rs
+core-foundation-sys 0.8.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/servo/core-foundation-rs
+cpufeatures 0.2.17
+  License: MIT OR Apache-2.0
+  Source: https://github.com/RustCrypto/utils
+crossterm 0.29.0
+  License: MIT
+  Source: https://github.com/crossterm-rs/crossterm
+crossterm_winapi 0.9.1
+  License: MIT
+  Source: https://github.com/crossterm-rs/crossterm-winapi
+crypto-common 0.1.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/RustCrypto/traits
+ctrlc 3.5.2
+  License: MIT/Apache-2.0
+  Source: https://github.com/Detegr/rust-ctrlc.git
+derive_more 2.1.1
+  License: MIT
+  Source: https://github.com/JelteF/derive_more
+derive_more-impl 2.1.1
+  License: MIT
+  Source: https://github.com/JelteF/derive_more
+digest 0.10.7
+  License: MIT OR Apache-2.0
+  Source: https://github.com/RustCrypto/traits
+dispatch2 0.3.1
+  License: Zlib OR Apache-2.0 OR MIT
+  Source: https://github.com/madsmtm/objc2
+document-features 0.2.12
+  License: MIT OR Apache-2.0
+  Source: https://github.com/slint-ui/document-features
+errno 0.3.14
+  License: MIT OR Apache-2.0
+  Source: https://github.com/lambda-fairy/rust-errno
+futures-core 0.3.34
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/futures-rs
+futures-task 0.3.34
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/futures-rs
+futures-util 0.3.34
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/futures-rs
+generic-array 0.14.7
+  License: MIT
+  Source: https://github.com/fizyk20/generic-array.git
+heck 0.5.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/withoutboats/heck
+io-kit-sys 0.4.1
+  License: MIT / Apache-2.0
+  Source: https://github.com/jtakakura/io-kit-rs
+io-kit-sys 0.5.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/jtakakura/io-kit-rs
+is_terminal_polyfill 1.70.2
+  License: MIT OR Apache-2.0
+  Source: https://github.com/polyfill-rs/is_terminal_polyfill
+itoa 1.0.18
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/itoa
+js-sys 0.3.105
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
+libc 0.2.189
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/libc
+linux-raw-sys 0.12.1
+  License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+  Source: https://github.com/sunfishcode/linux-raw-sys
+litrs 1.0.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/LukasKalbertodt/litrs
+lock_api 0.4.14
+  License: MIT OR Apache-2.0
+  Source: https://github.com/Amanieu/parking_lot
+log 0.4.34
+  License: MIT OR Apache-2.0
+  Source: https://github.com/rust-lang/log
+mach2 0.4.3
+  License: BSD-2-Clause OR MIT OR Apache-2.0
+  Source: https://github.com/JohnTitor/mach2
+mach2 0.5.0
+  License: BSD-2-Clause OR MIT OR Apache-2.0
+  Source: https://github.com/JohnTitor/mach2
+memchr 2.8.3
+  License: Unlicense OR MIT
+  Source: https://github.com/BurntSushi/memchr
+mio 1.2.3
+  License: MIT
+  Source: https://github.com/tokio-rs/mio
+nix 0.26.4
+  License: MIT
+  Source: https://github.com/nix-rust/nix
+nix 0.31.3
+  License: MIT
+  Source: https://github.com/nix-rust/nix
+nusb 0.2.7
+  License: Apache-2.0 OR MIT
+  Source: https://github.com/kevinmehall/nusb
+objc2 0.6.4
+  License: MIT
+  Source: https://github.com/madsmtm/objc2
+objc2-encode 4.1.0
+  License: MIT
+  Source: https://github.com/madsmtm/objc2
+once_cell 1.21.4
+  License: MIT OR Apache-2.0
+  Source: https://github.com/matklad/once_cell
+once_cell_polyfill 1.70.2
+  License: MIT OR Apache-2.0
+  Source: https://github.com/polyfill-rs/once_cell_polyfill
+parking_lot 0.12.5
+  License: MIT OR Apache-2.0
+  Source: https://github.com/Amanieu/parking_lot
+parking_lot_core 0.9.12
+  License: MIT OR Apache-2.0
+  Source: https://github.com/Amanieu/parking_lot
+pin-project-lite 0.2.17
+  License: Apache-2.0 OR MIT
+  Source: https://github.com/taiki-e/pin-project-lite
+proc-macro2 1.0.107
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/proc-macro2
+quote 1.0.47
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/quote
+redox_syscall 0.5.18
+  License: MIT
+  Source: https://gitlab.redox-os.org/redox-os/syscall
+rustc_version 0.4.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/djc/rustc-version-rs
+rustix 1.1.5
+  License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+  Source: https://github.com/bytecodealliance/rustix
+rustversion 1.0.23
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/rustversion
+scopeguard 1.2.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/bluss/scopeguard
+semver 1.0.28
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/semver
+serde 1.0.229
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/serde
+serde_core 1.0.229
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/serde
+serde_derive 1.0.229
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/serde
+serde_json 1.0.151
+  License: MIT OR Apache-2.0
+  Source: https://github.com/serde-rs/json
+serialport 4.10.1
+  License: MPL-2.0
+  Source: https://github.com/serialport/serialport-rs
+sha2 0.10.9
+  License: MIT OR Apache-2.0
+  Source: https://github.com/RustCrypto/hashes
+signal-hook 0.3.18
+  License: Apache-2.0/MIT
+  Source: https://github.com/vorner/signal-hook
+signal-hook-mio 0.2.5
+  License: MIT OR Apache-2.0
+  Source: https://github.com/vorner/signal-hook
+signal-hook-registry 1.4.8
+  License: MIT OR Apache-2.0
+  Source: https://github.com/vorner/signal-hook
+slab 0.4.12
+  License: MIT
+  Source: https://github.com/tokio-rs/slab
+smallvec 1.16.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/servo/rust-smallvec
+strsim 0.11.1
+  License: MIT
+  Source: https://github.com/rapidfuzz/strsim-rs
+syn 2.0.119
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/syn
+syn 3.0.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/syn
+thiserror 2.0.20
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/thiserror
+thiserror-impl 2.0.20
+  License: MIT OR Apache-2.0
+  Source: https://github.com/dtolnay/thiserror
+typenum 1.20.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/paholg/typenum
+unescaper 0.1.10
+  License: MIT OR GPL-3.0-only
+  Source: https://github.com/hack-ink/unescaper
+unicode-ident 1.0.26
+  License: (MIT OR Apache-2.0) AND Unicode-3.0
+  Source: https://github.com/dtolnay/unicode-ident
+unicode-segmentation 1.13.3
+  License: MIT OR Apache-2.0
+  Source: https://github.com/unicode-rs/unicode-segmentation
+utf8parse 0.2.2
+  License: Apache-2.0 OR MIT
+  Source: https://github.com/alacritty/vte
+version_check 0.9.5
+  License: MIT/Apache-2.0
+  Source: https://github.com/SergioBenitez/version_check
+wasi 0.11.1+wasi-snapshot-preview1
+  License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+  Source: https://github.com/bytecodealliance/wasi
+wasm-bindgen 0.2.128
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen
+wasm-bindgen-futures 0.4.78
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
+wasm-bindgen-macro 0.2.128
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
+wasm-bindgen-macro-support 0.2.128
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support
+wasm-bindgen-shared 0.2.128
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
+web-sys 0.3.105
+  License: MIT OR Apache-2.0
+  Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
+winapi 0.3.9
+  License: MIT/Apache-2.0
+  Source: https://github.com/retep998/winapi-rs
+winapi-i686-pc-windows-gnu 0.4.0
+  License: MIT/Apache-2.0
+  Source: https://github.com/retep998/winapi-rs
+winapi-x86_64-pc-windows-gnu 0.4.0
+  License: MIT/Apache-2.0
+  Source: https://github.com/retep998/winapi-rs
+windows-link 0.2.1
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows-sys 0.52.0
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows-sys 0.61.2
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows-targets 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_aarch64_gnullvm 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_aarch64_msvc 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_i686_gnu 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_i686_gnullvm 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_i686_msvc 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_x86_64_gnu 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_x86_64_gnullvm 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+windows_x86_64_msvc 0.52.6
+  License: MIT OR Apache-2.0
+  Source: https://github.com/microsoft/windows-rs
+zmij 1.0.23
+  License: MIT
+  Source: https://github.com/dtolnay/zmij
+
+This notice is informational and does not replace third-party license texts. Preserve applicable copyright notices and license texts when redistributing.
