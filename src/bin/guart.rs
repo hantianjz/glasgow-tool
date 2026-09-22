@@ -1,11 +1,13 @@
+mod common;
+#[path = "common/guart.rs"]
+mod guart;
+
 use clap::Parser;
-use glasgow_tool::cli::GuartCli;
-use glasgow_tool::glasgow;
 
 fn main() {
-    let cli = GuartCli::parse();
-    if let Err(error) = glasgow::run(cli) {
+    let cli = guart::GuartCli::parse();
+    if let Err(error) = guart::run(cli) {
         eprintln!("error: {error}");
-        std::process::exit(error.exit_code().as_i32());
+        std::process::exit(common::exit_code(&error));
     }
 }

@@ -10,10 +10,10 @@ use nusb::{Device, Interface, MaybeFuture};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::cli::AppError;
-use crate::resources::{GlasgowResource, for_revision};
+use super::resources::{GlasgowResource, for_revision};
+use crate::Error;
 
-use super::device::{API_LEVEL, GLASGOW_PID, GLASGOW_VID, GlasgowDeviceInfo, list_devices};
+use super::device::{API_LEVEL, DeviceInfo, GLASGOW_PID, GLASGOW_VID, list_devices};
 
 const REQUEST_FPGA_LOAD_CFG: u8 = 0x20;
 const REQUEST_FPGA_STATUS: u8 = 0x22;
@@ -27,6 +27,9 @@ const CYPRESS_RAM: u8 = 0xa0;
 const CYPRESS_CPUCS: u16 = 0xe600;
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 const FPGA_TIMEOUT: Duration = Duration::from_secs(2);
+const UPSTREAM_COMMIT: &str = "b2a15e9c797b90167d96257a557218ddb7984e71";
+const FIRMWARE_SOURCE_SHA256: &str =
+    "f3f368032a9e2d70ab57ef8bea33109ac733165fe1ca170b18b8de03225a8b0e";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Register {
@@ -110,9 +113,9 @@ pub struct ValidatedResource {
     pub bitstream_id: [u8; 8],
 }
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, AppError> {
+fn decode_hex(value: &str) -> Result<Vec<u8>, Error> {
     if !value.len().is_multiple_of(2) {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "resource contains odd-length hex".to_owned(),
         ));
     }
@@ -123,16 +126,16 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, AppError> {
         .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair)
-                .map_err(|_| AppError::Protocol("resource contains invalid hex".to_owned()))?;
+                .map_err(|_| Error::Protocol("resource contains invalid hex".to_owned()))?;
             u8::from_str_radix(text, 16)
-                .map_err(|_| AppError::Protocol("resource contains invalid hex".to_owned()))
+                .map_err(|_| Error::Protocol("resource contains invalid hex".to_owned()))
         })
         .collect()
 }
 
-pub fn validate_resource(revision: &str) -> Result<ValidatedResource, AppError> {
+pub fn validate_resource(revision: &str) -> Result<ValidatedResource, Error> {
     let embedded = for_revision(revision).ok_or_else(|| {
-        AppError::Protocol(format!(
+        Error::Protocol(format!(
             "Glasgow revision {revision} is unsupported; expected C0, C1, C2, or C3"
         ))
     })?;
@@ -150,11 +153,11 @@ pub fn validate_resource_data(
     revision: &str,
     manifest_bytes: &[u8],
     bitstream: &[u8],
-) -> Result<(ResourceManifest, [u8; 8]), AppError> {
+) -> Result<(ResourceManifest, [u8; 8]), Error> {
     let manifest: ResourceManifest = serde_json::from_slice(manifest_bytes)
-        .map_err(|error| AppError::Protocol(format!("invalid embedded manifest: {error}")))?;
+        .map_err(|error| Error::Protocol(format!("invalid embedded manifest: {error}")))?;
     let profile_valid = manifest.profile.port == "A"
-        && manifest.profile.voltage == 3.3
+        && manifest.profile.voltage.to_bits() == 3.3_f64.to_bits()
         && manifest.profile.rx == "A0"
         && manifest.profile.tx == "A1"
         && manifest.profile.data_bits == 8
@@ -163,24 +166,26 @@ pub fn validate_resource_data(
         && manifest.profile.flow_control == "none"
         && !manifest.profile.inverted;
     if manifest.schema_version != 1
+        || manifest.upstream_commit != UPSTREAM_COMMIT
         || manifest.revision != revision
         || manifest.firmware.api_level != API_LEVEL
+        || manifest.firmware.source_sha256 != FIRMWARE_SOURCE_SHA256
         || !profile_valid
     {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "embedded Glasgow resource schema, revision, firmware, or profile mismatch".to_owned(),
         ));
     }
     let digest = format!("{:x}", Sha256::digest(bitstream));
     if digest != manifest.bitstream.sha256 || manifest.bitstream.file != format!("{revision}.bit") {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "embedded Glasgow bitstream digest mismatch".to_owned(),
         ));
     }
     let id = decode_hex(&manifest.bitstream.id)?;
     let bitstream_id: [u8; 8] = id
         .try_into()
-        .map_err(|_| AppError::Protocol("Glasgow bitstream ID is not eight bytes".to_owned()))?;
+        .map_err(|_| Error::Protocol("Glasgow bitstream ID is not eight bytes".to_owned()))?;
     for register in [
         &manifest.registers.baud_divisor,
         &manifest.registers.rx_errors,
@@ -195,7 +200,7 @@ pub fn validate_resource_data(
             || register.endian != "little"
             || !matches!(register.access.as_str(), "ro" | "rw")
         {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "embedded Glasgow register metadata mismatch".to_owned(),
             ));
         }
@@ -205,7 +210,7 @@ pub fn validate_resource_data(
         || manifest.pipe.rx.max_packet != 512
         || manifest.pipe.tx.max_packet != 512
     {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "embedded Glasgow pipe metadata mismatch".to_owned(),
         ));
     }
@@ -220,20 +225,20 @@ pub struct Management {
 }
 
 impl Management {
-    pub fn claim(device: &Device) -> Result<Self, AppError> {
+    pub fn claim(device: &Device) -> Result<Self, Error> {
         let interface = device.claim_interface(0).wait().map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot claim Glasgow management interface: {error}"
             ))
         })?;
         interface.set_alt_setting(1).wait().map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot enable Glasgow management interface: {error}"
             ))
         })?;
         let reader = EndpointRead::new(
             interface.endpoint::<Bulk, In>(0x81).map_err(|error| {
-                AppError::Protocol(format!("Glasgow management IN endpoint mismatch: {error}"))
+                Error::Protocol(format!("Glasgow management IN endpoint mismatch: {error}"))
             })?,
             64,
         )
@@ -241,7 +246,7 @@ impl Management {
         .with_read_timeout(COMMAND_TIMEOUT);
         let writer = EndpointWrite::new(
             interface.endpoint::<Bulk, Out>(0x01).map_err(|error| {
-                AppError::Protocol(format!("Glasgow management OUT endpoint mismatch: {error}"))
+                Error::Protocol(format!("Glasgow management OUT endpoint mismatch: {error}"))
             })?,
             64,
         )
@@ -255,9 +260,9 @@ impl Management {
         })
     }
 
-    pub fn command(&mut self, payload: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub fn command(&mut self, payload: &[u8]) -> Result<Vec<u8>, Error> {
         if payload.len() > 63 {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "Glasgow management command exceeds 63-byte payload".to_owned(),
             ));
         }
@@ -269,36 +274,34 @@ impl Management {
         self.writer
             .write_all(&packet)
             .and_then(|()| self.writer.flush())
-            .map_err(|error| {
-                AppError::Access(format!("Glasgow management write failed: {error}"))
-            })?;
+            .map_err(|error| Error::Access(format!("Glasgow management write failed: {error}")))?;
         let mut response = [0_u8; 64];
         let length = self.reader.read(&mut response).map_err(|error| {
-            AppError::Access(format!("Glasgow management response failed: {error}"))
+            Error::Access(format!("Glasgow management response failed: {error}"))
         })?;
         if length == 0 || response[0] != serial {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "Glasgow management response serial mismatch".to_owned(),
             ));
         }
         Ok(response[1..length].to_vec())
     }
 
-    fn expect_ack(&mut self, payload: &[u8], operation: &str) -> Result<(), AppError> {
+    fn expect_ack(&mut self, payload: &[u8], operation: &str) -> Result<(), Error> {
         let response = self.command(payload)?;
         if response == [RESULT_ACK] {
             Ok(())
         } else {
-            Err(AppError::Protocol(format!(
+            Err(Error::Protocol(format!(
                 "Glasgow {operation} returned {response:02x?}"
             )))
         }
     }
 
-    pub fn fpga_status(&mut self) -> Result<Option<[u8; 8]>, AppError> {
+    pub fn fpga_status(&mut self) -> Result<Option<[u8; 8]>, Error> {
         let response = self.command(&[REQUEST_FPGA_STATUS])?;
         if response.len() != 13 || response[0] != RESULT_ACK {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "invalid Glasgow FPGA status response".to_owned(),
             ));
         }
@@ -306,13 +309,9 @@ impl Management {
         Ok((id != [0; 8]).then_some(id))
     }
 
-    pub fn finish_fpga_load(
-        &mut self,
-        length: usize,
-        bitstream_id: [u8; 8],
-    ) -> Result<(), AppError> {
+    pub fn finish_fpga_load(&mut self, length: usize, bitstream_id: [u8; 8]) -> Result<(), Error> {
         let length = u32::try_from(length)
-            .map_err(|_| AppError::Protocol("Glasgow bitstream is too large".to_owned()))?;
+            .map_err(|_| Error::Protocol("Glasgow bitstream is too large".to_owned()))?;
         let mut payload = Vec::with_capacity(13);
         payload.push(REQUEST_FPGA_LOAD_CFG);
         payload.extend_from_slice(&length.to_le_bytes());
@@ -325,7 +324,7 @@ impl Management {
                     thread::sleep(Duration::from_millis(10));
                 }
                 response => {
-                    return Err(AppError::Protocol(format!(
+                    return Err(Error::Protocol(format!(
                         "Glasgow FPGA configuration failed with {response:02x?}"
                     )));
                 }
@@ -333,7 +332,7 @@ impl Management {
         }
     }
 
-    pub fn write_register(&mut self, register: &Register, value: u32) -> Result<(), AppError> {
+    pub fn write_register(&mut self, register: &Register, value: u32) -> Result<(), Error> {
         let width = usize::from(register.storage_bytes);
         let bytes = value.to_be_bytes();
         let mut payload = Vec::with_capacity(width + 2);
@@ -342,14 +341,14 @@ impl Management {
         self.expect_ack(&payload, "register write")
     }
 
-    pub fn read_register(&mut self, register: &Register) -> Result<u32, AppError> {
+    pub fn read_register(&mut self, register: &Register) -> Result<u32, Error> {
         let response = self.command(&[
             REQUEST_FPGA_GET_REG,
             register.address,
             register.storage_bytes,
         ])?;
         if response.len() != usize::from(register.storage_bytes) + 1 || response[0] != RESULT_ACK {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "invalid Glasgow register response".to_owned(),
             ));
         }
@@ -359,7 +358,7 @@ impl Management {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    pub fn set_fixed_profile(&mut self, enable: bool) -> Result<(), AppError> {
+    pub fn set_fixed_profile(&mut self, enable: bool) -> Result<(), Error> {
         let millivolts = if enable { 3300_u16 } else { 0 };
         let mut voltage = vec![REQUEST_SET_VSUPPLY, 0x01];
         for _ in 0..4 {
@@ -373,21 +372,21 @@ impl Management {
 }
 
 pub fn upload_fx2_firmware(
-    selected: &GlasgowDeviceInfo,
+    selected: &DeviceInfo,
     resource: &ValidatedResource,
-) -> Result<GlasgowDeviceInfo, AppError> {
+) -> Result<DeviceInfo, Error> {
     if selected.native.vendor_id() != GLASGOW_VID || selected.native.product_id() != GLASGOW_PID {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "refusing firmware upload to a non-Glasgow USB identity".to_owned(),
         ));
     }
     let device = selected.native.open().wait().map_err(|error| {
-        AppError::Access(format!("cannot open Glasgow for firmware upload: {error}"))
+        Error::Access(format!("cannot open Glasgow for firmware upload: {error}"))
     })?;
     let interface = device.claim_interface(0).wait().map_err(|error| {
-        AppError::Access(format!("cannot claim Glasgow for firmware upload: {error}"))
+        Error::Access(format!("cannot claim Glasgow for firmware upload: {error}"))
     })?;
-    let ram_write = |address: u16, data: &[u8]| -> Result<(), AppError> {
+    let ram_write = |address: u16, data: &[u8]| -> Result<(), Error> {
         interface
             .control_out(
                 ControlOut {
@@ -401,7 +400,7 @@ pub fn upload_fx2_firmware(
                 COMMAND_TIMEOUT,
             )
             .wait()
-            .map_err(|error| AppError::Access(format!("Cypress RAM upload failed: {error}")))?;
+            .map_err(|error| Error::Access(format!("Cypress RAM upload failed: {error}")))?;
         Ok(())
     };
     ram_write(CYPRESS_CPUCS, &[1])?;
@@ -409,7 +408,7 @@ pub fn upload_fx2_firmware(
         let data = decode_hex(&segment.data_hex)?;
         for (offset, chunk) in data.chunks(4096).enumerate() {
             let offset = u16::try_from(offset * 4096)
-                .map_err(|_| AppError::Protocol("FX2 firmware segment is too large".to_owned()))?;
+                .map_err(|_| Error::Protocol("FX2 firmware segment is too large".to_owned()))?;
             ram_write(segment.address.wrapping_add(offset), chunk)?;
         }
     }
@@ -425,10 +424,43 @@ pub fn upload_fx2_firmware(
             return Ok(device);
         }
         if Instant::now() >= deadline {
-            return Err(AppError::Timeout(
+            return Err(Error::Timeout(
                 "Glasgow did not re-enumerate after FX2 firmware upload".to_owned(),
             ));
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::super::resources::{GLASGOW_RESOURCES, for_revision};
+    use super::validate_resource_data;
+
+    #[test]
+    fn revision_resources_are_exact_and_unknown_revisions_are_rejected() {
+        let revisions = GLASGOW_RESOURCES
+            .iter()
+            .map(|resource| resource.revision)
+            .collect::<Vec<_>>();
+        assert_eq!(revisions, ["C0", "C1", "C2", "C3"]);
+        assert!(for_revision("C0").is_some());
+        assert!(for_revision("C3").is_some());
+        assert!(for_revision("B3").is_none());
+        assert!(for_revision("C4").is_none());
+    }
+
+    #[test]
+    fn validation_rejects_schema_and_digest_corruption() {
+        let resource = for_revision("C3").expect("embedded C3 resource");
+        validate_resource_data("C3", resource.manifest, resource.bitstream).unwrap();
+
+        let mut manifest: serde_json::Value = serde_json::from_slice(resource.manifest).unwrap();
+        manifest["schema_version"] = 2.into();
+        let invalid_schema = serde_json::to_vec(&manifest).unwrap();
+        assert!(validate_resource_data("C3", &invalid_schema, resource.bitstream).is_err());
+
+        let mut corrupted = resource.bitstream.to_vec();
+        corrupted[0] ^= 1;
+        assert!(validate_resource_data("C3", resource.manifest, &corrupted).is_err());
     }
 }

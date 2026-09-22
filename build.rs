@@ -68,14 +68,11 @@ fn validate_manifest(revision: &str, manifest: &[u8], bitstream: &[u8]) {
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let resources = manifest_dir.join("target/glasgow-uart");
-    assert!(
-        resources.is_dir(),
-        "run bin/b to generate Glasgow UART resources"
-    );
+    let resources = manifest_dir.join("resources/glasgow-uart");
+    assert!(resources.is_dir(), "missing tracked Glasgow UART resources");
 
     let revisions: BTreeSet<_> = fs::read_dir(&resources)
-        .unwrap_or_else(|_| panic!("run bin/b to generate Glasgow UART resources"))
+        .unwrap_or_else(|_| panic!("missing tracked Glasgow UART resources"))
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
@@ -97,9 +94,9 @@ fn main() {
         let manifest_path = resources.join(format!("{revision}.json"));
         let bitstream_path = resources.join(format!("{revision}.bit"));
         let manifest = fs::read(&manifest_path)
-            .unwrap_or_else(|_| panic!("run bin/b to generate Glasgow UART resources"));
+            .unwrap_or_else(|_| panic!("missing tracked {revision} Glasgow UART manifest"));
         let bitstream = fs::read(&bitstream_path)
-            .unwrap_or_else(|_| panic!("run bin/b to generate Glasgow UART resources"));
+            .unwrap_or_else(|_| panic!("missing tracked {revision} Glasgow UART bitstream"));
         validate_manifest(revision, &manifest, &bitstream);
 
         let out_manifest = out_dir.join(format!("{revision}.json"));

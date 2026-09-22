@@ -1,11 +1,13 @@
+#[path = "common/c232uart.rs"]
+mod c232uart;
+mod common;
+
 use clap::Parser;
-use glasgow_tool::c232;
-use glasgow_tool::cli::C232Cli;
 
 fn main() {
-    let cli = C232Cli::parse();
-    if let Err(error) = cli.validate().and_then(|()| c232::run(cli)) {
+    let cli = c232uart::C232Cli::parse();
+    if let Err(error) = cli.validate().and_then(|()| c232uart::run(cli)) {
         eprintln!("error: {error}");
-        std::process::exit(error.exit_code().as_i32());
+        std::process::exit(common::exit_code(&error));
     }
 }

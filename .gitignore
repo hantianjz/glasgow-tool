@@ -2,4 +2,5 @@
 .envy-cache-*
 target/
 gateware/.venv/
+resources/glasgow-uart/build-cache.json
 *.pyc

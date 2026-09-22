@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use serialport::{DataBits, FlowControl, Parity, SerialPort, SerialPortType, StopBits};
+use serialport::{
+    ClearBuffer, DataBits, FlowControl, Parity, SerialPort, SerialPortType, StopBits,
+};
 
-use crate::cli::AppError;
-use crate::events::{Backend, HardwareCounters};
-use crate::session::{TransferFailureKind, TransferOutcome, Transport, TransportMetadata};
+use crate::Error;
+use crate::uart::transport::{Counters, Metadata, TransferFailureKind, TransferOutcome, Transport};
 
 pub const FTDI_VID: u16 = 0x0403;
 pub const FTDI_PID: u16 = 0x6014;
@@ -99,9 +100,9 @@ fn stable_path(_port: &str) -> Option<String> {
     None
 }
 
-pub fn list_devices() -> Result<Vec<VcpDevice>, AppError> {
+pub fn list_devices() -> Result<Vec<VcpDevice>, Error> {
     let ports = serialport::available_ports()
-        .map_err(|error| AppError::Access(format!("cannot enumerate serial ports: {error}")))?;
+        .map_err(|error| Error::Access(format!("cannot enumerate serial ports: {error}")))?;
     let mut devices = Vec::new();
     for port in ports {
         let sysfs = linux_usb_metadata(&port.port_name);
@@ -153,7 +154,7 @@ pub fn select_device(
     devices: &[VcpDevice],
     serial: Option<&str>,
     port: Option<&Path>,
-) -> Result<VcpDevice, AppError> {
+) -> Result<VcpDevice, Error> {
     let matches: Vec<_> = devices
         .iter()
         .filter(|device| serial.is_none_or(|serial| device.serial == serial))
@@ -169,14 +170,14 @@ pub fn select_device(
         .cloned()
         .collect();
     match matches.as_slice() {
-        [] if serial.is_some() && port.is_some() => Err(AppError::Selection(
+        [] if serial.is_some() && port.is_some() => Err(Error::Selection(
             "--serial and --port do not identify the same C232HD-DDHSP-0".to_owned(),
         )),
-        [] => Err(AppError::Selection(
+        [] => Err(Error::Selection(
             "no matching C232HD-DDHSP-0 was found".to_owned(),
         )),
         [device] => Ok(device.clone()),
-        _ => Err(AppError::Selection(
+        _ => Err(Error::Selection(
             "multiple C232HD-DDHSP-0 devices match; specify --serial".to_owned(),
         )),
     }
@@ -189,9 +190,9 @@ pub struct BaudResult {
     pub actual: u32,
 }
 
-pub fn ftdi_high_speed_baud(requested: u32) -> Result<BaudResult, AppError> {
+pub fn ftdi_high_speed_baud(requested: u32) -> Result<BaudResult, Error> {
     if !(9_600..=12_000_000).contains(&requested) {
-        return Err(AppError::Selection(
+        return Err(Error::Selection(
             "baud rate must be between 9600 and 12000000".to_owned(),
         ));
     }
@@ -205,14 +206,15 @@ pub fn ftdi_high_speed_baud(requested: u32) -> Result<BaudResult, AppError> {
         const FRACTION_CODE: [u32; 8] = [0, 3, 2, 4, 1, 5, 6, 7];
         let divisor = ((96_000_000_u64 + u64::from(requested) / 2) / u64::from(requested))
             .clamp(16, 0x1_ffff) as u32;
-        let actual = ((96_000_000_u64 + u64::from(divisor) / 2) / u64::from(divisor)) as u32;
+        let actual = u32::try_from((96_000_000_u64 + u64::from(divisor) / 2) / u64::from(divisor))
+            .expect("FTDI divisor result fits in u32");
         let encoded = (divisor >> 3) | (FRACTION_CODE[(divisor & 7) as usize] << 14);
         (divisor, encoded, actual)
     };
     encoded_divisor |= 0x2_0000;
     let error = u64::from(actual.abs_diff(requested)) * 10_000 / u64::from(requested);
     if error > 200 {
-        return Err(AppError::Validation(format!(
+        return Err(Error::Validation(format!(
             "requested baud {requested} is represented as {actual}, exceeding 2% error"
         )));
     }
@@ -224,7 +226,7 @@ pub fn ftdi_high_speed_baud(requested: u32) -> Result<BaudResult, AppError> {
 }
 
 pub struct VcpTransport {
-    metadata: TransportMetadata,
+    metadata: Metadata,
     read_port: Mutex<Box<dyn SerialPort>>,
     write_port: Mutex<Box<dyn SerialPort>>,
     cancelled: AtomicBool,
@@ -235,7 +237,7 @@ impl VcpTransport {
         device: &VcpDevice,
         requested_baud: u32,
         explicit_port: Option<&Path>,
-    ) -> Result<Self, AppError> {
+    ) -> Result<Self, Error> {
         let baud = ftdi_high_speed_baud(requested_baud)?;
         let path = explicit_port
             .map(PathBuf::from)
@@ -253,7 +255,7 @@ impl VcpTransport {
             builder = builder.exclusive(true);
         }
         let mut read_port = builder.open().map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot open C232HD serial {} at {}: {error}",
                 device.serial,
                 path.display()
@@ -262,30 +264,37 @@ impl VcpTransport {
         read_port
             .write_data_terminal_ready(false)
             .map_err(|error| {
-                AppError::Access(format!(
+                Error::Access(format!(
                     "cannot deassert DTR for C232HD serial {} at {}: {error}",
                     device.serial,
                     path.display()
                 ))
             })?;
         read_port.write_request_to_send(false).map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot deassert RTS for C232HD serial {} at {}: {error}",
                 device.serial,
                 path.display()
             ))
         })?;
+        read_port.clear(ClearBuffer::Input).map_err(|error| {
+            Error::Access(format!(
+                "cannot clear stale input for C232HD serial {} at {}: {error}",
+                device.serial,
+                path.display()
+            ))
+        })?;
         let write_port = read_port.try_clone().map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot clone C232HD serial {} at {}: {error}",
                 device.serial,
                 path.display()
             ))
         })?;
         Ok(Self {
-            metadata: TransportMetadata {
-                backend: Backend::Vcp,
-                serial: device.serial.clone(),
+            metadata: Metadata {
+                backend: "vcp",
+                serial: Some(device.serial.clone()),
                 path: Some(path.to_string_lossy().into_owned()),
                 requested_baud,
                 actual_baud: baud.actual,
@@ -319,7 +328,7 @@ fn io_outcome(result: io::Result<usize>) -> TransferOutcome {
 }
 
 impl Transport for VcpTransport {
-    fn metadata(&self) -> &TransportMetadata {
+    fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
@@ -337,22 +346,22 @@ impl Transport for VcpTransport {
         io_outcome(self.write_port.lock().write(data))
     }
 
-    fn drain(&self, timeout: Duration) -> Result<(), AppError> {
+    fn drain(&self, timeout: Duration) -> Result<(), Error> {
         let deadline = Instant::now() + timeout;
         loop {
             let queued = self.write_port.lock().bytes_to_write().map_err(|error| {
-                AppError::Access(format!(
+                Error::Access(format!(
                     "cannot inspect C232HD output queue for serial {}: {error}",
-                    self.metadata.serial
+                    self.metadata.serial.as_deref().unwrap_or("<no serial>")
                 ))
             })?;
             if queued == 0 {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(AppError::Timeout(format!(
+                return Err(Error::Timeout(format!(
                     "C232HD serial {} did not drain within {} ms",
-                    self.metadata.serial,
+                    self.metadata.serial.as_deref().unwrap_or("<no serial>"),
                     timeout.as_millis()
                 )));
             }
@@ -364,7 +373,23 @@ impl Transport for VcpTransport {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn counters(&self) -> HardwareCounters {
-        HardwareCounters::default()
+    fn counters(&self) -> Counters {
+        Counters::default()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::ftdi_high_speed_baud;
+
+    #[test]
+    fn baud_boundaries_enforce_two_percent_error() {
+        let low = ftdi_high_speed_baud(9_600).unwrap();
+        assert!(low.actual.abs_diff(9_600) * 100 <= 9_600 * 2);
+        let high = ftdi_high_speed_baud(12_000_000).unwrap();
+        assert_eq!(high.actual, 12_000_000);
+        assert_ne!(high.encoded_divisor & 0x2_0000, 0);
+        assert!(ftdi_high_speed_baud(10_000_000).is_err());
+        assert!(ftdi_high_speed_baud(9_599).is_err());
+        assert!(ftdi_high_speed_baud(12_000_001).is_err());
     }
 }

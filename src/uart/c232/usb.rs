@@ -11,9 +11,8 @@ use nusb::transfer::{Bulk, ControlIn, ControlOut, ControlType, Direction, In, Ou
 use nusb::{Device, DeviceInfo, Endpoint, Interface, MaybeFuture};
 use parking_lot::Mutex;
 
-use crate::cli::AppError;
-use crate::events::{Backend, HardwareCounters};
-use crate::session::{TransferFailureKind, TransferOutcome, Transport, TransportMetadata};
+use crate::Error;
+use crate::uart::transport::{Counters, Metadata, TransferFailureKind, TransferOutcome, Transport};
 
 use super::vcp::{FTDI_PID, FTDI_VID, PRODUCT, ftdi_high_speed_baud};
 
@@ -46,11 +45,11 @@ pub struct FtdiLineCounters {
     pub transmitter_empty: bool,
 }
 
-/// Strip the two FTDI status bytes from every USB packet, including short packets.
-pub fn strip_ftdi_status(
+#[cfg(test)]
+fn strip_ftdi_status(
     transfer: &[u8],
     max_packet: usize,
-) -> Result<(Vec<u8>, FtdiLineCounters), AppError> {
+) -> Result<(Vec<u8>, FtdiLineCounters), Error> {
     let (payload, counters, _) = strip_ftdi_status_from(transfer, max_packet, Some(0))?;
     Ok((payload, counters))
 }
@@ -59,9 +58,9 @@ fn strip_ftdi_status_from(
     transfer: &[u8],
     max_packet: usize,
     mut previous_line: Option<u8>,
-) -> Result<(Vec<u8>, FtdiLineCounters, Option<u8>), AppError> {
+) -> Result<(Vec<u8>, FtdiLineCounters, Option<u8>), Error> {
     if max_packet < 2 {
-        return Err(AppError::Protocol(
+        return Err(Error::Protocol(
             "FTDI endpoint max-packet size is smaller than its status header".to_owned(),
         ));
     }
@@ -69,7 +68,7 @@ fn strip_ftdi_status_from(
     let mut counters = FtdiLineCounters::default();
     for packet in transfer.chunks(max_packet) {
         if packet.len() < 2 {
-            return Err(AppError::Protocol(
+            return Err(Error::Protocol(
                 "FTDI USB packet ended inside its status header".to_owned(),
             ));
         }
@@ -87,16 +86,16 @@ fn strip_ftdi_status_from(
 }
 
 #[derive(Clone)]
-struct UsbDeviceInfo {
-    serial: String,
-    path: String,
+pub(super) struct UsbDeviceInfo {
+    pub(super) serial: String,
+    pub(super) path: String,
     native: DeviceInfo,
 }
 
-fn list_devices() -> Result<Vec<UsbDeviceInfo>, AppError> {
+pub(super) fn list_devices() -> Result<Vec<UsbDeviceInfo>, Error> {
     let mut devices = nusb::list_devices()
         .wait()
-        .map_err(|error| AppError::Access(format!("cannot enumerate USB devices: {error}")))?
+        .map_err(|error| Error::Access(format!("cannot enumerate USB devices: {error}")))?
         .filter(|info| {
             info.vendor_id() == FTDI_VID
                 && info.product_id() == FTDI_PID
@@ -114,24 +113,24 @@ fn list_devices() -> Result<Vec<UsbDeviceInfo>, AppError> {
     Ok(devices)
 }
 
-fn select_device(serial: Option<&str>) -> Result<UsbDeviceInfo, AppError> {
+fn select_device(serial: Option<&str>) -> Result<UsbDeviceInfo, Error> {
     let devices = list_devices()?;
     let matches = devices
         .into_iter()
         .filter(|device| serial.is_none_or(|serial| device.serial == serial))
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [] => Err(AppError::Selection(
+        [] => Err(Error::Selection(
             "no matching C232HD-DDHSP-0 USB device was found".to_owned(),
         )),
         [device] => Ok(device.clone()),
-        _ => Err(AppError::Selection(
+        _ => Err(Error::Selection(
             "multiple C232HD-DDHSP-0 devices match; specify --serial".to_owned(),
         )),
     }
 }
 
-fn discover_endpoints(device: &Device) -> Result<(u8, u8, usize), AppError> {
+fn discover_endpoints(device: &Device) -> Result<(u8, u8, usize), Error> {
     for configuration in device.configurations() {
         for interface in configuration.interfaces() {
             if interface.interface_number() != 0 {
@@ -160,12 +159,12 @@ fn discover_endpoints(device: &Device) -> Result<(u8, u8, usize), AppError> {
             }
         }
     }
-    Err(AppError::Protocol(
+    Err(Error::Protocol(
         "C232HD bulk endpoint descriptors are missing".to_owned(),
     ))
 }
 
-fn control_out(interface: &Interface, request: u8, value: u16, index: u16) -> Result<(), AppError> {
+fn control_out(interface: &Interface, request: u8, value: u16, index: u16) -> Result<(), Error> {
     interface
         .control_out(
             ControlOut {
@@ -180,12 +179,12 @@ fn control_out(interface: &Interface, request: u8, value: u16, index: u16) -> Re
         )
         .wait()
         .map_err(|error| {
-            AppError::Access(format!("FTDI control request {request} failed: {error}"))
+            Error::Access(format!("FTDI control request {request} failed: {error}"))
         })?;
     Ok(())
 }
 
-fn modem_status(interface: &Interface) -> Result<[u8; 2], AppError> {
+fn modem_status(interface: &Interface) -> Result<[u8; 2], Error> {
     let response = interface
         .control_in(
             ControlIn {
@@ -199,21 +198,22 @@ fn modem_status(interface: &Interface) -> Result<[u8; 2], AppError> {
             IO_TIMEOUT,
         )
         .wait()
-        .map_err(|error| AppError::Access(format!("FTDI modem-status request failed: {error}")))?;
+        .map_err(|error| Error::Access(format!("FTDI modem-status request failed: {error}")))?;
     response
         .as_slice()
         .try_into()
-        .map_err(|_| AppError::Protocol("FTDI modem-status response is not two bytes".to_owned()))
+        .map_err(|_| Error::Protocol("FTDI modem-status response is not two bytes".to_owned()))
 }
 
-fn configure_ftdi(interface: &Interface, requested_baud: u32) -> Result<u32, AppError> {
+fn configure_ftdi(interface: &Interface, requested_baud: u32) -> Result<u32, Error> {
     control_out(interface, SIO_RESET, RESET_DEVICE, INTERFACE_INDEX)?;
     control_out(interface, SIO_RESET, PURGE_RX, INTERFACE_INDEX)?;
     control_out(interface, SIO_RESET, PURGE_TX, INTERFACE_INDEX)?;
     control_out(interface, SIO_SET_LATENCY, 16, INTERFACE_INDEX)?;
     let baud = ftdi_high_speed_baud(requested_baud)?;
-    let value = baud.encoded_divisor as u16;
-    let index = ((baud.encoded_divisor >> 8) as u16 & 0xff00) | INTERFACE_INDEX;
+    let divisor_bytes = baud.encoded_divisor.to_le_bytes();
+    let value = u16::from_le_bytes([divisor_bytes[0], divisor_bytes[1]]);
+    let index = (u16::from(divisor_bytes[2]) << 8) | INTERFACE_INDEX;
     control_out(interface, SIO_SET_BAUD, value, index)?;
     control_out(interface, SIO_SET_DATA, 8, INTERFACE_INDEX)?;
     control_out(interface, SIO_SET_FLOW_CTRL, 0, INTERFACE_INDEX)?;
@@ -289,7 +289,7 @@ impl UsbRx {
 }
 
 pub struct UsbTransport {
-    metadata: TransportMetadata,
+    metadata: Metadata,
     device: Device,
     interface: Option<Interface>,
     read: Mutex<Option<UsbRx>>,
@@ -301,10 +301,10 @@ pub struct UsbTransport {
 }
 
 impl UsbTransport {
-    pub fn open(serial: Option<&str>, requested_baud: u32) -> Result<Self, AppError> {
+    pub fn open(serial: Option<&str>, requested_baud: u32) -> Result<Self, Error> {
         let selected = select_device(serial)?;
         let device = selected.native.open().wait().map_err(|error| {
-            AppError::Access(format!(
+            Error::Access(format!(
                 "cannot open C232HD USB serial {} at {}: {error}",
                 selected.serial, selected.path
             ))
@@ -317,13 +317,13 @@ impl UsbTransport {
                     || (cfg!(target_os = "linux") && error.os_error() == Some(61)) =>
             {
                 device.attach_kernel_driver(0).map_err(|attach_error| {
-                    AppError::Access(format!(
+                    Error::Access(format!(
                         "cannot restore the VCP driver for C232HD serial {} at {}: {attach_error}",
                         selected.serial, selected.path
                     ))
                 })?;
                 device.detach_kernel_driver(0).map_err(|detach_error| {
-                    AppError::Access(format!(
+                    Error::Access(format!(
                         "cannot detach the restored VCP driver for C232HD serial {} at {}: {detach_error}",
                         selected.serial, selected.path
                     ))
@@ -331,27 +331,23 @@ impl UsbTransport {
                 true
             }
             Err(error) => {
-                return Err(AppError::Access(format!(
+                return Err(Error::Access(format!(
                     "cannot detach the VCP driver for C232HD serial {} at {}: {error}",
                     selected.serial, selected.path
                 )));
             }
         };
-        let setup = (|| -> Result<_, AppError> {
+        let setup = (|| -> Result<_, Error> {
             let interface = device.claim_interface(0).wait().map_err(|error| {
-                AppError::Access(format!("cannot claim C232HD USB interface: {error}"))
+                Error::Access(format!("cannot claim C232HD USB interface: {error}"))
             })?;
             let actual_baud = configure_ftdi(&interface, requested_baud)?;
             let read_endpoint = interface
                 .endpoint::<Bulk, In>(rx_address)
-                .map_err(|error| {
-                    AppError::Protocol(format!("FTDI RX endpoint mismatch: {error}"))
-                })?;
+                .map_err(|error| Error::Protocol(format!("FTDI RX endpoint mismatch: {error}")))?;
             let write_endpoint = interface
                 .endpoint::<Bulk, Out>(tx_address)
-                .map_err(|error| {
-                    AppError::Protocol(format!("FTDI TX endpoint mismatch: {error}"))
-                })?;
+                .map_err(|error| Error::Protocol(format!("FTDI TX endpoint mismatch: {error}")))?;
             let read = UsbRx::new(read_endpoint, max_packet);
             let write = EndpointWrite::new(write_endpoint, USB_TRANSFER_SIZE)
                 .with_num_transfers(USB_TRANSFER_COUNT)
@@ -366,9 +362,9 @@ impl UsbTransport {
             }
         };
         Ok(Self {
-            metadata: TransportMetadata {
-                backend: Backend::Usb,
-                serial: selected.serial,
+            metadata: Metadata {
+                backend: "usb",
+                serial: Some(selected.serial),
                 path: Some(selected.path),
                 requested_baud,
                 actual_baud,
@@ -388,7 +384,7 @@ impl UsbTransport {
 }
 
 impl Transport for UsbTransport {
-    fn metadata(&self) -> &TransportMetadata {
+    fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
@@ -447,7 +443,7 @@ impl Transport for UsbTransport {
         }
     }
 
-    fn drain(&self, timeout: Duration) -> Result<(), AppError> {
+    fn drain(&self, timeout: Duration) -> Result<(), Error> {
         let deadline = Instant::now() + timeout;
         if let Some(write) = self.write.lock().as_mut() {
             write.set_write_timeout(timeout);
@@ -455,12 +451,12 @@ impl Transport for UsbTransport {
             write.set_write_timeout(IO_TIMEOUT);
             flush_result.map_err(|error| {
                 if error.kind() == io::ErrorKind::TimedOut {
-                    AppError::Timeout(format!(
+                    Error::Timeout(format!(
                         "FTDI USB drain exceeded {} ms",
                         timeout.as_millis()
                     ))
                 } else {
-                    AppError::Access(format!("FTDI USB drain failed: {error}"))
+                    Error::Access(format!("FTDI USB drain failed: {error}"))
                 }
             })?;
         }
@@ -468,14 +464,14 @@ impl Transport for UsbTransport {
             let interface = self
                 .interface
                 .as_ref()
-                .ok_or_else(|| AppError::Access("FTDI USB interface is closed".to_owned()))?;
+                .ok_or_else(|| Error::Access("FTDI USB interface is closed".to_owned()))?;
             if modem_status(interface)?[1] & LINE_TEMT != 0 {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(AppError::Timeout(format!(
+                return Err(Error::Timeout(format!(
                     "C232HD USB serial {} did not drain within {} ms",
-                    self.metadata.serial,
+                    self.metadata.serial.as_deref().unwrap_or("<no serial>"),
                     timeout.as_millis()
                 )));
             }
@@ -490,8 +486,8 @@ impl Transport for UsbTransport {
         }
     }
 
-    fn counters(&self) -> HardwareCounters {
-        HardwareCounters {
+    fn counters(&self) -> Counters {
+        Counters {
             rx_errors: self.rx_errors.load(Ordering::Relaxed),
             rx_overflow: self.rx_overflow.load(Ordering::Relaxed),
         }
@@ -526,5 +522,23 @@ impl Drop for UsbTransport {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::strip_ftdi_status;
+
+    #[test]
+    fn status_is_stripped_from_full_and_short_packets() {
+        let mut transfer = vec![0, 1 << 6];
+        transfer.extend((0_u16..510).map(|value| value.to_le_bytes()[0]));
+        transfer.extend([0, (1 << 1) | (1 << 2), 0xaa, 0xbb, 0xcc]);
+        let (payload, counters) = strip_ftdi_status(&transfer, 512).unwrap();
+        assert_eq!(payload.len(), 513);
+        assert_eq!(&payload[510..], &[0xaa, 0xbb, 0xcc]);
+        assert_eq!(counters.overflow, 1);
+        assert_eq!(counters.errors, 1);
+        assert!(!counters.transmitter_empty);
+        assert!(strip_ftdi_status(&[0], 512).is_err());
     }
 }
