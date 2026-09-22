@@ -481,4 +481,4 @@ REM --project ahead of the caller's argv: this script belongs to one project; ta
 REM means a hand-typed --project wins. The dot keeps %~dp0's backslash off the quote.
 REM envy sync may rewrite this script; single line ensures cmd.exe never reads past here.
 :run
-"!ENVY_BIN!" --project "%~dp0." %* & exit /b !ERRORLEVEL!
+"!ENVY_BIN!" --quiet --project "%~dp0." %* & exit /b !ERRORLEVEL!

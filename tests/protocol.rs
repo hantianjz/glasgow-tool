@@ -106,7 +106,6 @@ impl Transport for Loopback {
             TransferOutcome::complete(count)
         }
     }
-
     fn drain(&self, _timeout: Duration) -> Result<(), AppError> {
         self.drains.fetch_add(1, Ordering::Relaxed);
         Ok(())

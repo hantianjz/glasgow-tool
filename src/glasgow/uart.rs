@@ -281,6 +281,9 @@ impl Transport for GlasgowTransport {
             Err(error) => map_io_error(error),
         }
     }
+    fn submit_tx(&self) {
+        self.write.lock().submit();
+    }
 
     fn drain(&self, timeout: Duration) -> Result<(), AppError> {
         let deadline = Instant::now() + timeout;

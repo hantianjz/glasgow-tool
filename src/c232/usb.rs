@@ -441,6 +441,11 @@ impl Transport for UsbTransport {
             ),
         }
     }
+    fn submit_tx(&self) {
+        if let Some(write) = self.write.lock().as_mut() {
+            write.submit();
+        }
+    }
 
     fn drain(&self, timeout: Duration) -> Result<(), AppError> {
         let deadline = Instant::now() + timeout;

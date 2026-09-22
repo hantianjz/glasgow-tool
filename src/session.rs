@@ -16,6 +16,7 @@ use crate::events::{Backend, EventLog, EventRecord, HardwareCounters, Phase};
 pub const APPLICATION_QUEUE_BYTES: usize = 64 * 1024;
 const WOULD_BLOCK_BACKOFF: Duration = Duration::from_millis(1);
 const COORDINATOR_TICK: Duration = Duration::from_millis(20);
+const CONSOLE_ESCAPE: u8 = 0x1d;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionMode {
@@ -96,6 +97,8 @@ pub trait Transport: Send + Sync {
     fn metadata(&self) -> &TransportMetadata;
     fn read(&self, buffer: &mut [u8]) -> TransferOutcome;
     fn write(&self, data: &[u8]) -> TransferOutcome;
+    /// Submit transport-buffered TX data without waiting for physical completion.
+    fn submit_tx(&self) {}
     fn drain(&self, timeout: Duration) -> Result<(), AppError>;
     fn cancel(&self);
     fn counters(&self) -> HardwareCounters;
@@ -205,10 +208,32 @@ fn write_transport(
     }
     Ok(())
 }
+struct SharedOutput<W>(Arc<Mutex<W>>);
 
-fn tx_worker<R: Read>(
+impl<W> SharedOutput<W> {
+    fn new(output: W) -> Self {
+        Self(Arc::new(Mutex::new(output)))
+    }
+}
+
+impl<W> Clone for SharedOutput<W> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<W: Write> SharedOutput<W> {
+    fn write_all_and_flush(&self, data: &[u8]) -> io::Result<()> {
+        let mut output = self.0.lock();
+        output.write_all(data)?;
+        output.flush()
+    }
+}
+
+fn tx_worker<R: Read, W: Write>(
     transport: Arc<dyn Transport>,
     mut input: R,
+    output: SharedOutput<W>,
     options: SessionOptions,
     statistics: Arc<AtomicStatistics>,
     cancelled: Arc<AtomicBool>,
@@ -223,23 +248,33 @@ fn tx_worker<R: Read>(
             match input.read(&mut buffer) {
                 Ok(0) => break StopReason::RxIdle,
                 Ok(length) => {
-                    if options.mode == SessionMode::Console
-                        && let Some(index) = buffer[..length].iter().position(|byte| *byte == 0x1c)
-                    {
-                        write_transport(
-                            transport.as_ref(),
-                            &buffer[..index],
-                            &statistics,
-                            &cancelled,
-                        )?;
-                        break StopReason::ConsoleEscape;
+                    let escape_index = (options.mode == SessionMode::Console)
+                        .then(|| {
+                            buffer[..length]
+                                .iter()
+                                .position(|byte| *byte == CONSOLE_ESCAPE)
+                        })
+                        .flatten();
+                    let transmitted = escape_index.unwrap_or(length);
+                    if options.mode == SessionMode::Console && transmitted != 0 {
+                        output
+                            .write_all_and_flush(&buffer[..transmitted])
+                            .map_err(|error| {
+                                AppError::Access(format!("local echo write failed: {error}"))
+                            })?;
                     }
                     write_transport(
                         transport.as_ref(),
-                        &buffer[..length],
+                        &buffer[..transmitted],
                         &statistics,
                         &cancelled,
                     )?;
+                    if options.mode == SessionMode::Console {
+                        transport.submit_tx();
+                    }
+                    if escape_index.is_some() {
+                        break StopReason::ConsoleEscape;
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
@@ -269,7 +304,7 @@ fn tx_worker<R: Read>(
 
 fn rx_worker<W: Write>(
     transport: Arc<dyn Transport>,
-    mut output: W,
+    output: SharedOutput<W>,
     statistics: Arc<AtomicStatistics>,
     cancelled: Arc<AtomicBool>,
     events: mpsc::Sender<WorkerEvent>,
@@ -286,11 +321,8 @@ fn rx_worker<W: Write>(
             }
             if outcome.completed != 0 {
                 output
-                    .write_all(&buffer[..outcome.completed])
+                    .write_all_and_flush(&buffer[..outcome.completed])
                     .map_err(|error| AppError::Access(format!("stdout write failed: {error}")))?;
-                output
-                    .flush()
-                    .map_err(|error| AppError::Access(format!("stdout flush failed: {error}")))?;
                 statistics
                     .rx
                     .fetch_add(outcome.completed as u64, Ordering::Relaxed);
@@ -368,6 +400,7 @@ where
     let statistics = Arc::new(AtomicStatistics::default());
     let last_rx = Arc::new(Mutex::new(Instant::now()));
     let (events_tx, events_rx) = mpsc::channel();
+    let output = SharedOutput::new(output);
 
     write_event(
         event_log,
@@ -384,12 +417,14 @@ where
         let cancelled = Arc::clone(&cancelled);
         let events = events_tx.clone();
         let worker_options = options.clone();
+        let output = output.clone();
         thread::Builder::new()
             .name("uart-tx".to_owned())
             .spawn(move || {
                 tx_worker(
                     transport,
                     input,
+                    output,
                     worker_options,
                     statistics,
                     cancelled,

@@ -71,7 +71,7 @@ bin/r c232uart --help
 Both tools expose:
 
 - `list`: passive discovery only. It never claims a device, uploads firmware, configures an FPGA, detaches a driver, or changes device state.
-- `console`: raw interactive terminal operation. Ctrl-\\ requests a clean stop; terminal state is restored on every exit path.
+- `console`: raw interactive terminal operation with immediate local echo. Ctrl-] requests a clean stop and is not transmitted; terminal state is restored on every exit path.
 - `stream`: copies stdin to UART and UART to stdout without text translation.
 
 Common defaults are 115200 bit/s, a 2 s stream timeout, and a 5 s final drain timeout. Supported requested rates are 9600 through 12,000,000 bit/s. Selection by serial is stable; ambiguous or absent selection fails instead of choosing an arbitrary device. `c232uart` defaults to `--backend vcp`; direct USB requires `--backend usb`. Backend-conflicting options are rejected.

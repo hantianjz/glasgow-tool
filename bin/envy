@@ -258,7 +258,7 @@ esac
 
 # --project ahead of the caller's argv: this script belongs to one project. take_last on
 # the option side means a hand-typed --project still wins.
-ENVY_ARGS=(--project "$(resolve_script_dir)")
+ENVY_ARGS=(--quiet --project "$(resolve_script_dir)")
 
 ENVY_BIN="$ENVY_CACHE/envy/$ENVY_VERSION/envy"
 
